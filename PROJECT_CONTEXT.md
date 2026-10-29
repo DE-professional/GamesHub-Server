@@ -8,15 +8,16 @@ Last updated: October 29, 2026.
 Backend API for a Unity minigame platform (team project, software dev class).
 Daily-reset minigames; the backend tracks user accounts and score history.
 The CS department chair wants it hosted publicly, so it is being built for real
-deployment, not just a class demo.
+deployment, not just a class demo. Not shipping until mid-December 2026 at the earliest.
 
 ## Current stack
 
-- Node.js, Express 5.3, TypeScript (CommonJS today; moving to ESM with Prisma 7)
-- Prisma 6.x (**upgrade to Prisma 7 in progress**, see below)
+- Node.js 24, Express 5.3, TypeScript 7, **ESM** (`"type": "module"`)
+- Prisma **7.10.1, pinned exactly** (`prisma`, `@prisma/client`, `@prisma/adapter-mariadb`),
+  `mariadb` driver 3.5.4, zod 4
 - MySQL 8.4 in Docker (Docker Desktop on macOS)
-- Server port 3900, configurable via `PORT` env var, loaded with `process.loadEnvFile()`
-- Git repo pushed to a remote; README with setup instructions, tested from a fresh clone
+- Server port 3900, configurable via `PORT`
+- Git repo pushed to a remote; README setup instructions verified from a fresh clone after the Prisma 7 upgrade
 
 ## Project structure
 
@@ -25,19 +26,32 @@ docker/
   Dockerfile           FROM mysql:8.4, COPY --chmod=0644 mysql-init/ into /docker-entrypoint-initdb.d/
   mysql-init/01-grant-dev-privileges.sh   GRANT ALL ON *.* to MYSQL_USER (dev only, for Prisma's shadow DB)
 docker-compose.yaml    service "db": build ./docker, port 3306:3306, named volume db-data
+prisma.config.ts       Prisma CLI config: schema path, migrations path, seed command, datasource URL
 prisma/
-  schema.prisma
-  migrations/          init (games table); possibly add_users (check with `npx prisma migrate status`)
-  seed.ts              idempotent upsert loop over a `games` list
+  schema.prisma        generator "prisma-client" → ../src/generated/prisma; datasource has no url
+  migrations/          init (games table), the only migration
+  seed.ts              idempotent upsert loop over a `games` list; imports `prisma` from src/db.js
 src/
-  index.ts             Express app, routes, env loading
-  db.ts                single shared PrismaClient
+  index.ts             Express app and routes
+  config.ts            loads .env if present, validates all env vars with zod, exports `config`
+  db.ts                single shared PrismaClient, built with the MariaDB adapter
   errors.ts            HttpError class, notFound, errorHandler
+  generated/prisma/    generated Prisma client (gitignored; run `npx prisma generate`)
 .env / .env.example    MYSQL_ROOT_PASSWORD, MYSQL_DATABASE=GamesHub, MYSQL_USER=GamesHub,
-                       MYSQL_PASSWORD, DATABASE_URL (mysql://...@127.0.0.1:3306/GamesHub), PORT=3900
+                       MYSQL_PASSWORD, DATABASE_URL (mysql://...@127.0.0.1:3306/GamesHub), PORT=3900,
+                       DB_ALLOW_PUBLIC_KEY_RETRIEVAL=true (local Docker only, see Prisma 7 notes)
 ```
 
-npm scripts: `dev` (tsx watch src/index.ts), `typecheck` (tsc --noEmit).
+npm scripts: `dev` (tsx watch src/index.ts), `typecheck` (tsc --noEmit), `db:seed` (prisma db seed).
+
+tsconfig: `module`/`moduleResolution` are `NodeNext` (deliberately not Prisma's suggested `bundler`:
+NodeNext makes tsc enforce Node's real ESM rules, so code that type-checks also runs under Node
+after compilation). `include`: `src`, `prisma`, `prisma.config.ts`.
+
+### Setup order (fresh clone)
+
+`npm install` → copy `.env.example` to `.env` → `docker compose up -d --build` →
+`npx prisma generate` → `npx prisma migrate dev` → `npm run db:seed` → `npm run dev`
 
 ### Why the Docker setup looks the way it does
 
@@ -48,15 +62,38 @@ npm scripts: `dev` (tsx watch src/index.ts), `typecheck` (tsc --noEmit).
   changes require `docker compose down -v` then `docker compose up -d --build`.
 - `.gitattributes` forces LF endings on `*.sh`.
 
+## Configuration
+
+- **App (`src/config.ts`):** calls `process.loadEnvFile()`, ignoring only ENOENT (no `.env` in
+  production). Variables already set in the shell take precedence over `.env`. Zod schema:
+  - `DATABASE_URL`: `z.url({ protocol: /^mysql$/ })`
+  - `PORT`: coerced int 1–65535, default 3900
+  - `DB_ALLOW_PUBLIC_KEY_RETRIEVAL`: `z.stringbool()`, default false (never `z.coerce.boolean()`:
+    it treats the string "false" as true)
+  - `refine`: the flag may only be true when the DATABASE_URL host is `localhost`, `127.0.0.1`,
+    or `[::1]`; otherwise the server refuses to start
+- **CLI (`prisma.config.ts`):** its own `loadEnvFile` guard plus Prisma's `env("DATABASE_URL")`.
+  Deliberately does not import `src/config.ts`: the CLI needs only the database URL, and
+  `prisma migrate deploy` should not require app secrets (token keys, email credentials) that
+  `src/config.ts` will grow to validate.
+- **db.ts:** parses `DATABASE_URL` with `new URL()` into adapter fields (host, port, user, password,
+  database). Username and password go through `decodeURIComponent` (percent-encoded characters in
+  generated passwords). One URL drives both the CLI and the app, so they cannot point at different databases.
+
 ## Database schema
 
 **Game** (`games`): `id` Int PK autoincrement, `slug` VarChar(64) unique, `name` VarChar(128).
 One row per kind of minigame. Slugs are permanent and are what Unity uses.
-Seeded games: `minesweeper`.
+Seeded games: `minesweeper`, `blackjack`, `price-is-nice`, `runner`, `sudoku`.
 
 Table collation is `utf8mb4_unicode_ci` (case-insensitive comparisons and unique indexes).
 
-**User**: redesign decided, not yet built (see Accounts).
+**User** (`users`): `id` Int PK autoincrement, `email` VarChar(254) unique, `password_hash` VarChar(255), `display_name` VarChar(16), `discriminator` SmallInt Between 1000-9999, `email_verified_at` DateTime(3) NULL. Unique IDX(`display_name` & `discriminator`)
+NOTE: discriminator CHECK constraint lives in the add_users migration SQL. prisma db push must NEVER be used, as the rule would be skipped.
+
+DB tables and columns are snake_case via @@map/@map.
+
+
 
 ## API so far
 
@@ -64,6 +101,8 @@ Table collation is `utf8mb4_unicode_ci` (case-insensitive comparisons and unique
   - slug validated with zod: `/^[a-z0-9-]{1,64}$/` → 400 `invalid_slug`
   - not found → 404 `game_not_found`
 - Unknown route → 404 `route_not_found`; unexpected errors → 500 `internal_error` (logged)
+- `GET /hello` and `GET /boom` are temporary test routes, marked in code; remove before shipping
+- `app.listen` callback rethrows startup errors (Express 5 passes them, e.g. EADDRINUSE)
 
 ## Conventions
 
@@ -73,6 +112,10 @@ Table collation is `utf8mb4_unicode_ci` (case-insensitive comparisons and unique
   HttpErrors are not logged; everything else is logged and returned as a generic 500.
   The handler delegates to `next(err)` if `res.headersSent`.
 - Validate input with zod `safeParse` before touching the database.
+- All environment access goes through `src/config.ts` (app) or `prisma.config.ts` (CLI);
+  never read `process.env` elsewhere.
+- Relative imports use `.js` extensions (`./db.js`), even in `.ts` files.
+- Import the Prisma client only via `src/db.ts`; never construct another PrismaClient.
 - Build responses field by field; never `res.json(row)` (avoids leaking ids, password hashes).
 - Seed scripts are idempotent (`upsert`).
 - Never edit an applied migration; create a new one.
@@ -93,7 +136,7 @@ Table collation is `utf8mb4_unicode_ci` (case-insensitive comparisons and unique
 - **Hosting:** may get AWS resources from the department chair (not confirmed). Build portably:
   server packaged as a Docker image, all config via environment variables, email sending
   behind an interface (console output in development).
-- **Prisma:** upgrade to Prisma 7, pinned (see below).
+- **Prisma:** stay on 7.x, pinned exactly. Do not move to Prisma 8 until it supports MySQL.
 
 ## Open questions
 
@@ -106,38 +149,56 @@ Table collation is `utf8mb4_unicode_ci` (case-insensitive comparisons and unique
 - Daily puzzle storage: probably one row per game per day holding the seed (and generator version).
 - What happens to the hosted service after the semester ends.
 
-## Prisma 7 upgrade: what is known
+## Prisma 7 notes (upgrade complete)
 
-- Target **Prisma 7.x** (7.10.1 or later in the 7 line), pinned. `npm install prisma` with no
-  version now installs a Prisma 8 release candidate, which does not support MySQL.
-- Prisma 6 security patches end November 19, 2026. Prisma 7 is supported for 18 months after
-  Prisma 8's general availability.
-- Upgrading also clears the `deepmerge-ts` npm audit warning.
-- Changes required:
-  - Project becomes ESM: `"type": "module"` in package.json; relative imports need `.js` extensions.
-  - New generator `prisma-client` with an `output` path; import the client from the generated
-    folder (gitignore it) instead of `@prisma/client`.
-  - `prisma.config.ts` holds the datasource URL, migrations path, and seed command.
-  - `.env` is no longer loaded automatically.
-  - MySQL driver adapter: `@prisma/adapter-mariadb` plus the `mariadb` driver; PrismaClient is
-    constructed with the adapter.
-  - Connection pool and SSL defaults differ from v6; configure deliberately for hosted databases.
-  - Possible MySQL 8.4 authentication issue over non-SSL connections (public key retrieval).
-- Requirements: Node 20.19+ (22 recommended), TypeScript 5.4+.
+- **Versions:** install with an explicit `@7` and `--save-exact`; a bare `npm install prisma`
+  resolves to the Prisma 8 line, which does not support MySQL. All three Prisma packages must
+  have the same version. Prisma 7 is supported for 18 months after Prisma 8's general availability.
+  Prisma recommends TypeScript 5.9; TypeScript 7 has worked so far.
+- **Generator:** `provider = "prisma-client"`, `output = "../src/generated/prisma"`,
+  `moduleFormat = "esm"`, `importFileExtension = "js"`. Prisma's docs suggest
+  `importFileExtension = "ts"` if tsx fails with `Cannot find module './internal/class.js'`;
+  that error did not occur, and `"ts"` would break a later `tsc` production build.
+- **Nothing runs automatically anymore:** `migrate dev` does not generate the client, and
+  `migrate dev` / `migrate reset` do not seed. Run `npx prisma generate` and `npm run db:seed` explicitly.
+- **`prisma generate` requires `DATABASE_URL` to be set**, even though it never connects
+  (`env()` is checked when the config loads). In the Docker build, give only that step a placeholder:
+  `RUN DATABASE_URL="mysql://build:build@localhost:3306/build" npx prisma generate`.
+  Do not loosen `prisma.config.ts`; a strict check gives clear errors for `migrate deploy`.
+- **Pool settings (db.ts), chosen deliberately:**
+  - `connectionLimit: 10` (driver default, written out; revisit for the hosted DB's connection limit)
+  - `connectTimeout: 5_000` ms (driver default 1s is too tight across a network)
+  - `idleTimeout: 300` seconds (driver default 1800s; cloud networks drop idle connections)
+- **MySQL 8.4 authentication bug (found and fixed):** `caching_sha2_password` has a fast path
+  (server-side cache) and a full path (needs RSA public key retrieval over non-TLS connections).
+  The cache is emptied when MySQL restarts, so the app failed with "Pool failed to retrieve a connection"
+  after every database restart until the CLI logged in first.
+  - Development fix: `allowPublicKeyRetrieval` from `DB_ALLOW_PUBLIC_KEY_RETRIEVAL` (true in local `.env`).
+  - Production: use TLS to the database instead; config.ts rejects the flag for non-local hosts.
+  - If the server ever runs inside Docker Compose (host `db`), the guard will reject it by design;
+    switch local development to TLS at that point rather than adding `db` to the allowed hosts.
+- **Verification procedures:**
+  - Restart test: stop the server, `docker compose restart db`, wait for `ready for connections`
+    in `docker compose logs db --tail 5`, run no CLI command, start the server, request `/games/minesweeper`.
+  - Database-down test: stop the db while the server runs; expect a 500 within ~10 s,
+    then recovery without restarting the server once the db is back.
 
 ## Roadmap
 
-1. Upgrade to Prisma 7 (next)
-2. Users table with the account design above
+1. ~~Upgrade to Prisma 7~~ (done October 29, 2026)
+2. Users table with the account design above (next)
 3. Registration (validation, password hashing, discriminator assignment)
 4. Email verification and password reset (email behind an interface)
 5. Login with tokens, plus auth middleware for protected endpoints
-6. Hardening: rate limiting on auth endpoints, security headers, CORS for WebGL
-7. Dockerfile for the server; production database user and `prisma migrate deploy` (prisma generate requires DATABASE_URL to be set)
+6. Hardening: rate limiting on auth endpoints, security headers, CORS for WebGL;
+   remove `/hello` and `/boom`; make sure the generic 500 message is neutral
+7. Dockerfile for the server (placeholder `DATABASE_URL` for `prisma generate`);
+   production database user, TLS to the database, and `prisma migrate deploy`
 8. Daily puzzles and scores, once the puzzle-generation decision is made
 
 ## Working style
 
 The developer is building this step by step to understand every piece: explain each
 step and the reasoning behind it, have them run commands themselves, and verify results
-before moving on.
+before moving on. To save usage, the developer pastes command output only when it doesn't
+match what was expected.
