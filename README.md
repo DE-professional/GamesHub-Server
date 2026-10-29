@@ -70,11 +70,11 @@ Prisma client. `db seed` adds the games list. Both are safe to re-run.
 npm run dev
 ```
 
-The server listens on `http://localhost:3000` and restarts automatically when
+The server listens on `http://localhost:3900` and restarts automatically when
 you save a file. Check it works:
 
 ```bash
-curl -i http://localhost:3000/games/minesweeper
+curl -i http://localhost:3900/games/minesweeper
 ```
 
 You should get `200 OK` with `{"slug":"minesweeper","name":"Minesweeper"}`.
@@ -95,7 +95,7 @@ data, reapplies the migrations, and reruns the seed.
 
 ## API
 
-Base URL (local): `http://localhost:3000`
+Base URL (local): `http://localhost:3900`
 
 ### `GET /games/:slug`
 
