@@ -131,6 +131,10 @@ change one after a game uses it.
 | Slug | Name |
 |---|---|
 | `minesweeper` | Minesweeper |
+| `sudoku` | Sudoku |
+| `price-is-nice` | Price Is Nice |
+| `blackjack` | Blackjack |
+| `runner` | Runner |
 
 To add a game, add an entry to the `games` list in `prisma/seed.ts`, run
 `npx prisma db seed`, and add it to this table.

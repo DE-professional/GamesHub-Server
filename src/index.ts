@@ -1,16 +1,17 @@
 import express from "express"
-import { error } from "node:console";
 import {prisma} from "./db";
 import {z} from "zod";
+import {config} from "./config";
 import {HttpError, errorHandler, notFound} from "./errors";
 
-const slugSchema = z.string().regex(/^[a-z0-9]{1,64}$/);
+const slugSchema = z.string().regex(/^[a-z0-9-]{1,64}$/);
 const app = express();
 
+//Remove before shipping
 app.get("/hello", (req,res)=>{
     res.json({message:"Hello!"});
 });
-
+//This too
 app.get("/boom", () => {
   throw new Error("something broke");
 });
@@ -33,6 +34,7 @@ app.get("/games/:slug", async (req, res) => {
 app.use(notFound);
 app.use(errorHandler);
 
-app.listen(3900,()=>{
-    console.log("Listening on http://localhost:3900");
+app.listen(config.PORT,(err)=>{
+    if(err) throw err;
+    console.log(`Listening on http://localhost:${config.PORT}`);
 });
