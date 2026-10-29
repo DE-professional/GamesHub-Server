@@ -3,11 +3,11 @@
 Backend API for the GamesHub minigame platform. It stores the list of games and,
 as it grows, user profiles and score history.
 
-Built with Node.js, Express 5, TypeScript, Prisma 6, and MySQL 8.4 (running in Docker).
+Built with Node.js, Express 5, TypeScript, Prisma 7, and MySQL 8.4 (running in Docker).
 
 ## Prerequisites
 
-- **Node.js 20 or newer** (22 LTS recommended). Check with `node --version`.
+- **Node.js 24 or newer**. Check with `node --version`.
 - **Docker Desktop**, installed and running.
 - **Git**
 
@@ -23,11 +23,6 @@ cd GamesHub-Server
 npm install
 ```
 
-npm will report a high-severity vulnerability in `deepmerge-ts`. It is a known
-issue in the Prisma 6 command-line tool only, not in anything the server runs.
-**Do not run `npm audit fix --force`**: it upgrades Prisma to a new major version
-and breaks the setup.
-
 ### 2. Create your environment file
 
 ```bash
@@ -39,11 +34,16 @@ On Windows PowerShell, use `Copy-Item .env.example .env`.
 The values in `.env.example` work as-is for local development. If you change a
 password, change it in **both** `MYSQL_PASSWORD` and `DATABASE_URL`. If a password
 contains `@`, `:`, `/`, `#`, or `?`, percent-encode those characters in
-`DATABASE_URL` (for example, `@` becomes `%40`).
+`DATABASE_URL` (for example, `@` becomes `%40`). Also, DB_ALLOW_PUBLIC_KEY_RETRIEVAL=true is required for the local Docker database. If not, upon first start, the DB will reject connections that don't have authorization (which hasn't been set up yet).
 
 `.env` is gitignored. Never commit it.
 
-### 3. Start the database
+### 3. Generate Prisma client
+```bash
+npx prisma generate
+```
+
+### 4. Start the database
 
 ```bash
 docker compose up -d --build
@@ -54,17 +54,17 @@ The first start takes a minute while MySQL initializes. Wait until the logs show
 `ready for connections` with `port: 3306`. (An earlier "ready for connections"
 line with `port: 0` is MySQL's temporary setup server; keep waiting.)
 
-### 4. Create the tables and add starting data
+### 5. Create the tables and add starting data
 
 ```bash
 npx prisma migrate dev
-npx prisma db seed
+npm run db:seed
 ```
 
 `migrate dev` applies every migration in `prisma/migrations/` and generates the
 Prisma client. `db seed` adds the games list. Both are safe to re-run.
 
-### 5. Start the server
+### 6. Start the server
 
 ```bash
 npm run dev

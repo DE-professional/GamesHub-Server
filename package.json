@@ -2,29 +2,27 @@
   "name": "gameshub-server",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "db:seed": "prisma db seed",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit"
   },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
-  },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
-    "@prisma/client": "^6.19.3",
+    "@prisma/adapter-mariadb": "7.10.1",
+    "@prisma/client": "7.10.1",
     "express": "^5.3.0",
+    "mariadb": "3.5.4",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^24.19.2",
-    "prisma": "^6.19.3",
+    "prisma": "7.10.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
