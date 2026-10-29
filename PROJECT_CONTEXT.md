@@ -133,7 +133,7 @@ Table collation is `utf8mb4_unicode_ci` (case-insensitive comparisons and unique
 4. Email verification and password reset (email behind an interface)
 5. Login with tokens, plus auth middleware for protected endpoints
 6. Hardening: rate limiting on auth endpoints, security headers, CORS for WebGL
-7. Dockerfile for the server; production database user and `prisma migrate deploy`
+7. Dockerfile for the server; production database user and `prisma migrate deploy` (prisma generate requires DATABASE_URL to be set)
 8. Daily puzzles and scores, once the puzzle-generation decision is made
 
 ## Working style

@@ -1,8 +1,8 @@
 import express from "express"
-import {prisma} from "./db";
+import {prisma} from "./db.js";
 import {z} from "zod";
-import {config} from "./config";
-import {HttpError, errorHandler, notFound} from "./errors";
+import {config} from "./config.js";
+import {HttpError, errorHandler, notFound} from "./errors.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9-]{1,64}$/);
 const app = express();

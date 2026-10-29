@@ -1,4 +1,4 @@
-import {prisma} from "../src/db";
+import {prisma} from "../src/db.js";
 
 const games = [
     { slug: "minesweeper", name: "Minesweeper" },
