@@ -29,7 +29,7 @@ docker-compose.yaml    service "db": build ./docker, port 3306:3306, named volum
 prisma.config.ts       Prisma CLI config: schema path, migrations path, seed command, datasource URL
 prisma/
   schema.prisma        generator "prisma-client" → ../src/generated/prisma; datasource has no url
-  migrations/          init (games table), the only migration
+  migrations/          init (games table), add_users (users table + hand-added CHECK constraint)
   seed.ts              idempotent upsert loop over a `games` list; imports `prisma` from src/db.js
 src/
   index.ts             Express app and routes
@@ -82,18 +82,38 @@ after compilation). `include`: `src`, `prisma`, `prisma.config.ts`.
 
 ## Database schema
 
+Table collation is `utf8mb4_unicode_ci`: comparisons and unique indexes are case-insensitive
+and accent-insensitive.
+
 **Game** (`games`): `id` Int PK autoincrement, `slug` VarChar(64) unique, `name` VarChar(128).
 One row per kind of minigame. Slugs are permanent and are what Unity uses.
 Seeded games: `minesweeper`, `blackjack`, `price-is-nice`, `runner`, `sudoku`.
 
-Table collation is `utf8mb4_unicode_ci` (case-insensitive comparisons and unique indexes).
+**User** (`users`):
 
-**User** (`users`): `id` Int PK autoincrement, `email` VarChar(254) unique, `password_hash` VarChar(255), `display_name` VarChar(16), `discriminator` SmallInt Between 1000-9999, `email_verified_at` DateTime(3) NULL. Unique IDX(`display_name` & `discriminator`)
-NOTE: discriminator CHECK constraint lives in the add_users migration SQL. prisma db push must NEVER be used, as the rule would be skipped.
+| Column | Type | Notes |
+|---|---|---|
+| `id` | Int PK autoincrement | never exposed in responses |
+| `email` | VarChar(254), unique | unique index is case-insensitive (`A@x.com` = `a@x.com`) |
+| `password_hash` | VarChar(255) | argon2id encoded string |
+| `display_name` | VarChar(16) | |
+| `discriminator` | SmallInt | CHECK `BETWEEN 1000 AND 9999` (`users_discriminator_range`) |
+| `email_verified_at` | DateTime(3), nullable | null = unverified |
+| `created_at` | DateTime(3) | default now |
+| `updated_at` | DateTime(3) | set by Prisma Client (`@updatedAt`), no DB default |
 
-DB tables and columns are snake_case via @@map/@map.
+- Unique index on (`display_name`, `discriminator`). Because of the collation, `Dan#1234`,
+  `DAN#1234`, and `Dán#1234` are the same tag (intended: blocks look-alike impersonation).
+- The CHECK constraint is not expressible in `schema.prisma`; it was added by hand to the
+  `add_users` migration SQL (created with `migrate dev --create-only`, edited, then applied).
+  Verified that `migrate dev` leaves it alone and that `migrate reset` rebuilds it.
+- Raw SQL inserts must set `updated_at` themselves.
+- Not yet in the table, by design: password-change tracking (depends on the token design, step 5)
+  and failed-login counters (step 6).
 
-
+**Score** (planned, step 8): each score row holds `user_id` (foreign key); `User` gets a virtual
+`scores Score[]` relation field (no column). Open: on account deletion, cascade-delete scores or
+keep them detached (nullable `user_id`); leaderboard composite index depends on the puzzle design.
 
 ## API so far
 
@@ -117,17 +137,23 @@ DB tables and columns are snake_case via @@map/@map.
 - Relative imports use `.js` extensions (`./db.js`), even in `.ts` files.
 - Import the Prisma client only via `src/db.ts`; never construct another PrismaClient.
 - Build responses field by field; never `res.json(row)` (avoids leaking ids, password hashes).
+- DB tables and columns are snake_case via `@@map` / `@map`; code uses camelCase.
 - Seed scripts are idempotent (`upsert`).
-- Never edit an applied migration; create a new one.
+- Never edit an applied migration; create a new one. Editing a migration before it is applied
+  (e.g. after `--create-only`) is fine. Applied migrations are checksummed in `_prisma_migrations`.
+- **Never use `prisma db push`**: it bypasses migration files and would skip hand-written SQL
+  such as the discriminator CHECK constraint.
+- Git: track `prisma/migrations/` (including `migration_lock.toml`), `schema.prisma`, `.env.example`;
+  never track `src/generated/`, `.env`, `node_modules/`.
 - Run commands from the project root.
 
 ## Decisions made
 
 - **Accounts:** email + password login with email verification and password reset.
   Public display name is Battle.net style, `Name#1234`: free display name plus a random
-  4-digit discriminator (1000–9999), unique on the pair. Assign by trying the insert and
-  retrying on a unique-constraint violation, with a retry limit. Always display the full tag.
-  Emails are private: never in API responses, leaderboards, or logs.
+  4-digit discriminator (1000–9999), unique on the pair. Always display the full tag.
+  Emails are private: never in API responses, leaderboards, or logs. (Exception: the
+  development console email sender prints the recipient; production never logs addresses.)
 - **Guests:** play without an account; scores stored only on the device. Guest scores are
   discarded when a guest registers. Unity should warn about this on the registration screen.
 - **Unity:** one score-saving interface with local and API implementations (Strategy pattern).
@@ -138,6 +164,33 @@ DB tables and columns are snake_case via @@map/@map.
   behind an interface (console output in development).
 - **Prisma:** stay on 7.x, pinned exactly. Do not move to Prisma 8 until it supports MySQL.
 
+### Registration (step 3), decided October 29, 2026
+
+1. **Endpoint:** `POST /auth/register`, JSON body `{ email, password, displayName }`.
+2. **Already-registered email:** the response is identical whether or not the email is in use,
+   so the endpoint cannot be used to discover accounts. New address: verification email.
+   Existing address: an email to its owner saying someone tried to register with it.
+   - Consequence: the registration response cannot include the new tag (an existing address
+     has no new tag to return). The client sees `displayName` and `discriminator`, as separate
+     fields, after verification / at login. Login and password reset must use the same kind
+     of generic responses, or the leak just moves there.
+   - Consequence: registration sends email, so the email interface (with its console
+     implementation) is built in step 3, not step 4.
+3. **Passwords:** 12–128 characters, length rules only, no composition rules (NIST discourages
+   them). Breached-password checking is a candidate for the hardening step.
+4. **Display names:** `^[A-Za-z0-9_]{3,16}$`. ASCII only: blocks look-alike characters, and avoids
+   JS (UTF-16) vs MySQL character-count mismatches. Can be widened later; narrowing is hard.
+5. **Hashing:** argon2id via the `argon2` npm package. Node 24.7+ has a built-in `crypto.argon2()`,
+   but it returns only raw bytes; the package also handles salts, the encoded hash format,
+   constant-time verification, and rehashing when settings change. Native dependency with
+   prebuilt Linux binaries; confirm in the Docker build (step 7).
+6. **Discriminators:** `crypto.randomInt(1000, 10000)` (unpredictable), try the insert, on a
+   unique violation of the tag index retry with a new number, max 5 attempts, then
+   `409 display_name_unavailable`. The database decides collisions, so concurrent
+   registrations cannot get the same tag.
+7. Normalize email (trim + lowercase) before validation and storage; the case-insensitive
+   unique index is the safety net, not the main mechanism.
+
 ## Open questions
 
 - Where is the daily puzzle built from its seed?
@@ -147,6 +200,7 @@ DB tables and columns are snake_case via @@map/@map.
   Can differ per game. Team decision pending.
 - Score direction differs per game (lower-is-better vs. higher-is-better); likely a column on Game.
 - Daily puzzle storage: probably one row per game per day holding the seed (and generator version).
+- Scores on account deletion: cascade-delete or keep detached (see Score above).
 - What happens to the hosted service after the semester ends.
 
 ## Prisma 7 notes (upgrade complete)
@@ -186,14 +240,19 @@ DB tables and columns are snake_case via @@map/@map.
 ## Roadmap
 
 1. ~~Upgrade to Prisma 7~~ (done October 29, 2026)
-2. Users table with the account design above (next)
-3. Registration (validation, password hashing, discriminator assignment)
-4. Email verification and password reset (email behind an interface)
+2. ~~Users table with the account design above~~ (done October 29, 2026)
+3. Registration (next), in this order:
+   - `express.json()` with a body size limit; map its errors in `errorHandler`
+     (malformed JSON → 400, oversized body → 413) instead of the current 500
+   - email interface with a console implementation
+   - validation, argon2id hashing, discriminator assignment, generic response
+4. Email verification and password reset (real email sender behind the interface)
 5. Login with tokens, plus auth middleware for protected endpoints
 6. Hardening: rate limiting on auth endpoints, security headers, CORS for WebGL;
-   remove `/hello` and `/boom`; make sure the generic 500 message is neutral
-7. Dockerfile for the server (placeholder `DATABASE_URL` for `prisma generate`);
-   production database user, TLS to the database, and `prisma migrate deploy`
+   breached-password check; remove `/hello` and `/boom`; make sure the generic 500 message is neutral
+7. Dockerfile for the server (placeholder `DATABASE_URL` for `prisma generate`; confirm argon2's
+   native binary works in the image); production database user, TLS to the database,
+   and `prisma migrate deploy`
 8. Daily puzzles and scores, once the puzzle-generation decision is made
 
 ## Working style
