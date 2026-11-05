@@ -272,6 +272,50 @@ Response `201`:
 
 `puzzleDate` is a calendar date, not a point in time: never convert it to local time.
 
+### `GET /games/:slug/scores/me`
+
+**Requires login.** Returns the logged-in player's scores for one game, newest puzzle date first,
+one page at a time.
+
+Query parameters, both optional:
+
+- `limit`: an integer from 1 to 100; default 30. Scores per page.
+- `before`: a date (`YYYY-MM-DD`). Only scores with an earlier puzzle date are returned. Pass the
+  previous page's `nextBefore` here to get the next (older) page.
+
+Response `200`:
+
+```json
+{
+  "scores": [
+    {
+      "game": "sudoku",
+      "puzzleDate": "2026-11-03",
+      "score": 500,
+      "formulaVersion": 1,
+      "submittedAt": "2026-11-03T17:42:10.123Z"
+    }
+  ],
+  "nextBefore": "2026-11-03"
+}
+```
+
+- Each item has the same shape as the `score` object from `POST /games/:slug/scores`.
+- `nextBefore` is the oldest `puzzleDate` on the page, or `null` when there are no older scores. To load the whole history, request pages
+  until it is `null`.
+- A game the player has never played returns `{ "scores": [], "nextBefore": null }`.
+- Scores from every formula version are included. Don't compare or sort scores across versions.
+- `?limit=1` returns only the most recent score: if its `puzzleDate` is today's UTC date, today's
+  puzzle has already been played.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 200 | | Scores returned (possibly none) |
+| 400 | `invalid_slug` | Slug isn't 1–64 lowercase letters, digits, or hyphens |
+| 400 | `invalid_limit` | `limit` isn't an integer from 1 to 100 |
+| 400 | `invalid_before` | `before` isn't a valid `YYYY-MM-DD` date |
+| 404 | `game_not_found` | No game has this slug |
+
 ### Games
 
 Each Unity game identifies itself by its **slug**. Slugs are permanent: never
@@ -348,8 +392,8 @@ src/
   middleware.ts        requireJson
   auth/                registration, login, sessions, passwords, tokens
   email/               email sending (prints to the console in development) and templates
-  games/               game slug validation
-  scores/              score submission
+  games/               game slug validation and lookup
+  scores/              score submission and history
 .env.example           template for your .env
 DEV_COMMANDS.md        terminal commands for testing and database work
 ```

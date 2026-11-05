@@ -3,11 +3,12 @@ import { z } from "zod";
 import { authenticate } from "../auth/sessions.js";
 import { prisma } from "../db.js";
 import { describeError, HttpError, uniqueViolationIndex } from "../errors.js";
+import { requireGame } from "../games/lookup.js";
 import { parseSlug } from "../games/slug.js";
 import { fromUtcDateString, toUtcDateString } from "./dates.js";
 import { scoreResponse } from "./response.js";
 
-const SCORE_INDEX = "scores_user_id_game_id_puzzle_date_key"
+const SCORE_INDEX = "scores_user_id_game_id_puzzle_date_key";
 
 //Cap max score
 const MAX_SCORE = 1_000_000;
@@ -51,14 +52,7 @@ export const submitScore: RequestHandler = async (req, res) => {
         throw new HttpError(400, "puzzle_date_closed", "Scores can only be submitted for today's puzzle (UTC)");
     }
 
-    const game = await prisma.game
-        .findUnique({ where: { slug }, select: { id: true, slug: true } })
-        .catch((err: unknown) => {
-            throw new Error(`Game lookup failed: ${describeError(err)}`);
-        });
-    if (game === null) {
-        throw new HttpError(404, "game_not_found", "Game not found");
-    }
+    const game = await requireGame(slug);
 
     const created = await prisma.score
         .create({
@@ -74,4 +68,3 @@ export const submitScore: RequestHandler = async (req, res) => {
 
     res.status(201).json({ score: scoreResponse(game.slug, created) });
 };
-

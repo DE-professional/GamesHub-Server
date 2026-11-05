@@ -1,7 +1,7 @@
 # GamesHub Server: Project Context
 
 Current state, decisions, and conventions for the GamesHub backend.
-Last updated: November 3, 2026.
+Last updated: November 5, 2026.
 
 ## What it is
 
@@ -26,9 +26,9 @@ for development and testing (setup in README.md) but don't add backend features.
 
 - `README.md` (repo): setup, day-to-day commands, troubleshooting, and the **API reference**
   (every endpoint's request, response, and error codes). Update it whenever an endpoint changes.
-- `DEV_COMMANDS.md` (repo): shell helpers (`dbq`, `dbsh`, `reg`, `signin`, `me`, `signout`,
-  `submit`, `tokhash`), date commands, an example session, database and Prisma commands.
-  Verification procedures below use these helpers.
+- `DEV_COMMANDS.md` (repo): shell helpers (`dbq`, `dbsh`, `reg`, `signin`, `loginas`, `me`,
+  `signout`, `submit`, `myscores`, `tokhash`), date commands, an example session, score-history
+  test data, database and Prisma commands. Verification procedures below use these helpers.
 - `CLIENT_TODO.md` (Unity repo): client-side requirements that come from backend decisions and
   that the server can't enforce (UTC puzzle dates, win score ≥ 1, one attempt per day, ...).
   Add to it whenever a backend decision creates a client obligation.
@@ -49,7 +49,7 @@ prisma/
   seed.ts              idempotent upsert loop over a `games` list; imports `prisma` from src/db.js
 src/
   index.ts             Express app and routes; mounts authRouter at /auth, GET /games/:slug,
-                       POST /games/:slug/scores
+                       POST /games/:slug/scores, GET /games/:slug/scores/me
   config.ts            loads .env if present, validates all env vars with zod, exports `config`
   db.ts                single shared PrismaClient, built with the MariaDB adapter
   errors.ts            HttpError, notFound, errorHandler (also maps body-parser errors),
@@ -73,11 +73,14 @@ src/
     index.ts           picks the implementation from EMAIL_TRANSPORT; exports the shared `emailSender`
     templates.ts       verificationEmail, registrationAttemptEmail
   games/
-    slug.ts            parseSlug (400 invalid_slug); used by both games routes
+    slug.ts            parseSlug (400 invalid_slug); used by every games route
+    lookup.ts          requireGame(slug) → { id, slug, name } or 404 game_not_found; used by every
+                       games route
   scores/
     dates.ts           toUtcDateString / fromUtcDateString ("YYYY-MM-DD" ⇄ Date at midnight UTC)
-    response.ts        scoreResponse (shared by submit and the planned history endpoint)
+    response.ts        scoreResponse (shared by submit and history)
     submit.ts          POST /games/:slug/scores
+    history.ts         GET /games/:slug/scores/me (query parsing for limit/before, keyset pagination)
   generated/prisma/    generated Prisma client (gitignored; run `npx prisma generate`)
 .env / .env.example    MYSQL_ROOT_PASSWORD, MYSQL_DATABASE=GamesHub, MYSQL_USER=GamesHub,
                        MYSQL_PASSWORD, DATABASE_URL (mysql://...@127.0.0.1:3306/GamesHub), PORT=3900,
@@ -218,7 +221,9 @@ as equal. Shared code in `src/auth/tokens.ts`; each token type only supplies its
 
 - Unique on (`user_id`, `game_id`, `puzzle_date`) = `scores_user_id_game_id_puzzle_date_key`:
   one submission per game per day. The same index serves per-user history queries (user first),
-  so there is no separate `user_id` index.
+  so there is no separate `user_id` index. Verified with `EXPLAIN` (November 5, 2026): the history
+  query uses it for both the filter and the order (`Backward index scan`, no filesort), given
+  realistic data (see the score-history verification procedure).
 - Unsigned columns (`@db.UnsignedInt`, `@db.UnsignedSmallInt`) instead of a CHECK constraint:
   they reject negatives and are expressible in `schema.prisma`, so no hand-edited migration SQL.
   Verified: inserting `-1` fails with "Out of range value".
@@ -248,6 +253,12 @@ Full request/response/error reference for clients: README.md. Implementation not
   Check order: 415 → 401 → `invalid_slug` → body fields (`invalid_puzzle_date`, `invalid_score`,
   `invalid_formula_version`, `invalid_body`) → `400 puzzle_date_closed` → `404 game_not_found` →
   `409 already_submitted` (from the unique violation, not a pre-check).
+- `GET /games/:slug/scores/me` (login required), query `?limit=1..100` (default 30) and
+  `?before=YYYY-MM-DD` (exclusive, optional) → `200 { scores: [scoreResponse...], nextBefore }`,
+  newest puzzle date first, `Cache-Control: no-store`. `nextBefore` is the oldest `puzzleDate` on the
+  page, or `null` when nothing older exists. Check order: 401 → `invalid_slug` → `invalid_limit` /
+  `invalid_before` → `404 game_not_found`. Empty history is `200` with `[]` and `null`.
+  Decisions 25–34.
 - Protected endpoints: `401 authentication_required` (no header) or `401 invalid_token`
   (malformed, unknown, or expired), always with `WWW-Authenticate: Bearer` (RFC 6750).
 - Non-JSON body on a JSON endpoint → `415 unsupported_media_type` (`requireJson` middleware).
@@ -270,7 +281,6 @@ Full request/response/error reference for clients: README.md. Implementation not
   Unmapped types (`stream.*`) mean a server bug and stay logged 500s. Mapping matters for security:
   a JSON parse error carries the raw request body (`err.body`), so logging it would write passwords
   to the logs. Messages are fixed strings; body-parser's own messages quote the input.
-- `GET /hello` and `GET /boom` are temporary test routes, marked in code; remove before shipping
 - `app.listen` callback rethrows startup errors (Express 5 passes them, e.g. EADDRINUSE)
 
 ## Conventions
@@ -281,7 +291,15 @@ Full request/response/error reference for clients: README.md. Implementation not
   HttpErrors are not logged; everything else is logged and returned as a generic 500.
   The handler delegates to `next(err)` if `res.headersSent`.
 - Validate input with zod `safeParse` before touching the database. Per-field error codes come
-  from the first zod issue's path, via a `FIELD_ERRORS` map (register, score submit).
+  from the first zod issue's path, via a `FIELD_ERRORS` map (register, score submit; `QUERY_ERRORS`
+  in score history).
+- Query parameters are always strings (or arrays, when repeated). Integers: `z.string()` with a
+  digits-only regex, then `.transform(Number).pipe(z.int()...)`; never `z.coerce.number()` (accepts
+  `""`, `" 5"`, `"1e1"`, `"0x10"`). A repeated parameter fails the string check (400). Unknown
+  parameters are ignored (zod strips them). A validation issue that maps to no known parameter is
+  a bug: throw a plain `Error` (logged 500), not a 400.
+- Look up games with `requireGame(slug)` (`src/games/lookup.ts`) after `parseSlug`; don't query
+  `prisma.game` in handlers.
 - Integers from clients: `z.int()` (rejects decimals, numeric strings, and unsafe integers;
   `z.number()` would let MySQL silently round `1.5`).
 - JSON-body routes get the `requireJson` middleware; handlers don't check Content-Type themselves.
@@ -316,7 +334,8 @@ Full request/response/error reference for clients: README.md. Implementation not
   (spam/phishing vector). Subjects and bodies are fixed text plus server-generated links.
 - Never log request bodies or email addresses (the console email sender is the one development-only
   exception).
-- Responses carrying a token: `Cache-Control: no-store`.
+- Responses carrying a token, and responses with per-player data that changes (score history):
+  `Cache-Control: no-store`.
 - DB tables and columns are snake_case via `@@map` / `@map`; code uses camelCase.
 - Seed scripts are idempotent (`upsert`).
 - Migrations: create with `--create-only`, review the SQL, then apply. Never edit an applied migration;
@@ -450,11 +469,44 @@ Full request/response/error reference for clients: README.md. Implementation not
     game can't guarantee it, add a `won` column.
 22. **`formula_version`** on each score (client-sent, starts at 1, bump when a formula changes), so
     scores from different formulas are never compared. Leaderboards will filter by version; a
-    per-game current version (column on `games`) can be added then.
+    per-game current version (column on `games`) can be added then. Until that column exists, only
+    the client knows a game's current version, so history filtering is client-side (decision 31).
 23. **Ties:** equal scores share a rank and the next rank is skipped (1, 2, 2, 4); within a tie,
     earlier `created_at` is listed first (display order only). No tiebreak data stored.
 24. **Account deletion cascades to scores** (resolves the earlier open question). Keeping scores
     detached later would mean making `user_id` nullable: an ordinary migration.
+
+### Score history, decided and built November 4, 2026 (verified November 5)
+
+25. **Route: `GET /games/:slug/scores/me`**, login required. Sits next to `POST /games/:slug/scores`;
+    `me` matches `/auth/me`. Plain `GET /games/:slug/scores` is left unused: unqualified it reads as
+    "everyone's scores for this game." Leaderboards get their own path (`/games/:slug/leaderboard`).
+26. **One game per request.** The unique index serves `WHERE user_id = ? AND game_id = ? ORDER BY
+    puzzle_date DESC` directly. A cross-game history couldn't use it for ordering and would need a
+    two-part cursor. A hub screen for all five games makes five requests until that's a real problem.
+27. **Keyset pagination, not offset:** `?limit=` and `?before=` (exclusive), newest first. Offset
+    pagination shifts rows when a score is added between page requests (duplicates), and reads and
+    discards skipped rows. The handler fetches `limit + 1` rows to know whether an older page exists,
+    without a COUNT query.
+28. **`limit`:** 1–100, default 30 (`400 invalid_limit`). **`before`:** `z.iso.date()` (real calendar
+    dates only) and not earlier than `1000-01-01`, the minimum of MySQL's `DATE`, so out-of-range
+    dates never reach the driver (`400 invalid_before`).
+29. **Response:** `{ scores, nextBefore }`; items from `scoreResponse`, so a score has the same shape
+    as in the submit response (one C# class). `game` repeats on every item; accepted for consistency.
+30. **Unknown slug → `404 game_not_found`**, not an empty list. Two queries (game, then scores): a
+    single query filtering on `game: { slug }` can't tell "no such game" from "no scores yet".
+31. **All formula versions are returned; the client shows only the current version** (decided
+    November 5). Sorting by score across versions would compare scores from different formulas
+    (decision 22). Older scores stay stored; a "show older versions" toggle needs no server change.
+32. **The history screen loads every page, then sorts on the client** (date and score columns,
+    ascending/descending; decided November 5). Pagination is kept anyway: responses stay bounded,
+    the code already existed, and the played-today check (decision 33) needs only `limit=1`.
+    Rejected: dropping pagination and returning the full history in one response.
+33. **Played-today check:** one attempt per day is the client's job (decision 19), but a second device
+    or cleared browser storage has no local record. Before starting a puzzle, the client requests
+    `?limit=1` and compares the newest `puzzleDate` with today's UTC date.
+34. **`Cache-Control: no-store`:** per-player data that changes on submit; a WebGL browser must not
+    reuse a stale copy right after a submission.
 
 ### Unique violations (P2002) with the MariaDB adapter (measured on 7.10.1)
 
@@ -498,7 +550,6 @@ Deferred by the November 3 priority change; none blocks client development again
 - Step 6: rate limiting on auth endpoints (login is open to password guessing until then), CORS
   for WebGL, security headers.
 - Step 7: server Docker image, production database user, TLS to the database, `migrate deploy`.
-- Remove `GET /hello` and `GET /boom`.
 
 ## Prisma 7 notes (upgrade complete)
 
@@ -570,6 +621,20 @@ Clean up with the `@example.com` delete afterwards.
   tomorrow → `puzzle_date_closed` (yesterday is accepted during the first hour after midnight UTC);
   slug `nope` → 404, `Bad_Slug` → `invalid_slug`; empty `$T` → 401; DB `puzzle_date` equals `$D`.
   Grace window: temporarily set `GRACE_PERIOD_MS` to 48 h, yesterday → 201; revert.
+- **Score history** (`loginas`, `myscores`; test data in DEV_COMMANDS.md). With test1's 73 sudoku
+  rows (today plus days 1–75 ago, skipping days 10–12):
+  - `limit=30` pages: 30 rows (`nextBefore` = 32 days ago), 30 rows (62 days ago), 13 rows (`null`);
+    each `nextBefore` passed as `before` continues without overlap; scores jump from 109 to 113 (gap).
+  - `limit=13&before=<62 days ago>` → 13 rows and `nextBefore: null` (no empty extra page).
+  - `limit=1` → today's row; `limit=1&before=$D` → yesterday's; no `limit` → 30 rows.
+  - A game with no scores → `200 {"scores":[],"nextBefore":null}`; test2 sees none of test1's scores.
+  - `before=0999-01-01` → 400 `invalid_before`.
+  - **Query plan:** `EXPLAIN` needs realistic data. With only test1's sudoku rows in the table, the
+    index condition matches every row, so MySQL correctly prefers a full scan plus filesort
+    (`key` NULL). After the bulk insert for other players and games and `ANALYZE TABLE scores`, both
+    plans use `scores_user_id_game_id_puzzle_date_key` (`ref` without `before`, `range` with it),
+    `Extra` shows `Backward index scan`, and there is no `Using filesort`. Don't use `FORCE INDEX`
+    to "pass" this check: the real query has no hint.
 - **Schema constraints:** raw inserts into `scores` with score `-1` fail (out of range); a duplicate
   (user, game, date) fails on the unique key; deleting a game with scores fails (RESTRICT);
   deleting the user cascades.
@@ -584,15 +649,16 @@ Clean up with the `@example.com` delete afterwards.
 4. ~~Login with tokens, `/auth/me`, logout~~ (done November 3, 2026; was step 5)
 5. Scores (was step 8, pulled forward):
    - ~~`scores` table~~, ~~`POST /games/:slug/scores`~~ (done November 3, 2026)
-   - **Next:** score history for the logged-in player (`scoreResponse` is ready for it; the unique
-     index serves the query). Then client work begins.
+   - ~~Score history, `GET /games/:slug/scores/me`~~ (built November 4, verified November 5, 2026).
+     The client-usable API is complete; client work can start against a local server (CLIENT_TODO.md).
    - Later: leaderboards (index design, ranking per decision 23, version filtering)
-6. Email verification endpoint and password reset (real email sender behind the interface);
-   settle the open questions on links, address squatting, and unverified login first
-7. Hardening: rate limiting on auth endpoints, security headers, CORS for WebGL;
+6. **Next:** email verification endpoint and password reset (real email sender behind the interface);
+   settle the open questions on links, address squatting, and unverified login first.
+   Called "step 4" in the decisions and release blockers above.
+7. Hardening ("step 6" above): rate limiting on auth endpoints, security headers, CORS for WebGL;
    breached-password check; cleanup of expired sessions and tokens. Pull CORS forward if the
    WebGL client needs testing before then.
-8. Dockerfile for the server (placeholder `DATABASE_URL` for `prisma generate`; confirm argon2's
+8. ("Step 7" above) Dockerfile for the server (placeholder `DATABASE_URL` for `prisma generate`; confirm argon2's
    native binary works in the image); production database user, TLS to the database,
    and `prisma migrate deploy`
 
@@ -620,6 +686,9 @@ Client-side obligations are tracked in CLIENT_TODO.md (Unity repo). Background:
   `Authorization: Bearer`. On any 401, discard and show login; on logout, discard regardless of the
   response. `GET /auth/me` checks a stored token at startup.
 - **Puzzle dates:** Unity picks the daily puzzle by the UTC date and submits that date.
+- **Score history:** one request per game. The history screen follows `nextBefore` until it's `null`,
+  keeps only the current formula version's scores, then sorts by date or score (stable sort, date
+  as tiebreaker). Before starting a puzzle, `?limit=1` tells whether today's was already played.
 
 ## Working style
 
@@ -634,3 +703,7 @@ match what was expected.
 - New work is split into numbered pieces, each with its checks; the developer confirms when a piece's
   checks pass.
 - At the end of a session, Claude sends full updated versions of this file and any other changed docs.
+  The developer replaces the Project's copy of this file; a session that ends without this leaves
+  the next one working from stale context (happened after the November 4 session).
+- If code the developer sends doesn't match this file, search the Project's past chats before
+  designing anything: the work may already exist.
