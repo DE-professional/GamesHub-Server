@@ -1,14 +1,13 @@
 import express from "express"
-import {prisma} from "./db.js";
-import {z} from "zod";
 import {config} from "./config.js";
-import {HttpError, errorHandler, notFound} from "./errors.js";
+import {errorHandler, notFound} from "./errors.js";
 import { authRouter } from "./auth/routes.js";
+import { requireGame } from "./games/lookup.js";
 import { parseSlug } from "./games/slug.js";
 import { requireJson } from "./middleware.js";
+import { getMyScores } from "./scores/history.js";
 import { submitScore } from "./scores/submit.js";
 
-const slugSchema = z.string().regex(/^[a-z0-9-]{1,64}$/);
 const app = express();
 
 // Largest planned body is registration (~3 KB worst case); see PROJECT_CONTEXT.
@@ -17,16 +16,12 @@ app.use(express.json({limit:"16kb"}));
 app.use("/auth", authRouter);
 
 app.get("/games/:slug", async (req, res) => {
-    const slug = parseSlug(req.params.slug)
-    const game = await prisma.game.findUnique({where:{slug:slug}});
-    if(!game){
-        throw new HttpError(404,"game_not_found",`No game with slug "${slug}" found`);
-    }
+    const game = await requireGame(parseSlug(req.params.slug));
     res.json({ slug: game.slug, name: game.name });
-
 });
 
 app.post("/games/:slug/scores", requireJson, submitScore);
+app.get("/games/:slug/scores/me", getMyScores);
 
 app.use(notFound);
 
