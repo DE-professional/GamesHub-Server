@@ -69,3 +69,19 @@ model Score{
   @@unique([userId, gameId, puzzleDate])
   @@map("scores")
 }
+// The Price Is Nice game for each puzzle date, picked by the server from Steam the first time
+// the date is requested and then served unchanged, so every player gets the same game.
+model PriceIsNicePuzzle {
+  id               Int      @id @default(autoincrement())
+  puzzleDate       DateTime @unique @map("puzzle_date") @db.Date
+  steamAppId       Int      @map("steam_app_id") @db.UnsignedInt
+  name             String   @db.VarChar(255)
+  shortDescription String   @map("short_description") @db.Text
+  priceCents       Int      @map("price_cents") @db.UnsignedInt
+  priceFormatted   String   @map("price_formatted") @db.VarChar(32)
+  // Screenshot URLs on Steam's CDN, in Steam's order
+  screenshots      Json
+  createdAt        DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@map("price_is_nice_puzzles")
+}

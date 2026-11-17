@@ -48,6 +48,9 @@ submit() { curl -s -w ' → %{http_code}\n' -X POST "$GAMESHUB_URL/games/$1/scor
 # GET /games/:slug/scores/me with the token in $T; arguments: slug, optional query string.
 myscores() { curl -s -w ' → %{http_code}\n' "$GAMESHUB_URL/games/$1/scores/me${2:+?$2}" -H "Authorization: Bearer $T"; }
 
+# GET /games/:slug/puzzle (no token needed); arguments: slug, puzzle date.
+puzzle() { curl -s -w ' → %{http_code} (%{time_total}s)\n' "$GAMESHUB_URL/games/$1/puzzle?puzzleDate=$2"; }
+
 # SHA-256 of a token, to compare with LOWER(HEX(token_hash)) in the database.
 tokhash() { printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
 ```
@@ -108,6 +111,23 @@ signout                              # → 204
 me                                   # → 401 invalid_token
 
 dbq "DELETE FROM users WHERE email LIKE '%@example.com';"
+```
+
+## Price Is Nice puzzles
+
+Needs `STEAM_API_KEY` in `.env`. The first request for a date picks a game from Steam and stores
+it (several seconds; up to ~15 the first time after a server start, which also downloads Steam's app
+list), and picks the next day's game in the background. Later requests read the stored row.
+
+```sh
+D=$(date -u +%F)
+puzzle price-is-nice "$D"            # → 200; slow the first time, then instant
+puzzle price-is-nice "$D"            # → 200, the same game
+puzzle sudoku "$D"                   # → 404 puzzle_not_served
+dbq "SELECT puzzle_date, steam_app_id, name, price_formatted, JSON_LENGTH(screenshots) AS shots FROM price_is_nice_puzzles;"
+
+# Make a date pick again (development only: players who already saw the old game would disagree)
+dbq "DELETE FROM price_is_nice_puzzles WHERE puzzle_date = '$D';"
 ```
 
 ## Score history test data

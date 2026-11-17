@@ -7,6 +7,7 @@ import { parseSlug } from "./games/slug.js";
 import { requireJson } from "./middleware.js";
 import { getMyScores } from "./scores/history.js";
 import { submitScore } from "./scores/submit.js";
+import { getDailyPuzzle } from "./puzzles/routes.js";
 
 const app = express();
 
@@ -22,6 +23,7 @@ app.get("/games/:slug", async (req, res) => {
 
 app.post("/games/:slug/scores", requireJson, submitScore);
 app.get("/games/:slug/scores/me", getMyScores);
+app.get("/games/:slug/puzzle", getDailyPuzzle);
 
 app.use(notFound);
 
@@ -31,4 +33,5 @@ app.listen(config.PORT,(err)=>{
     if(err) throw err;
     console.log(`Listening on http://localhost:${config.PORT}`);
     console.log(`Email transport: ${config.EMAIL_TRANSPORT}`);
+    console.log(`Price Is Nice puzzles: ${config.STEAM_API_KEY ? "enabled" : "disabled (STEAM_API_KEY not set)"}`);
 });

@@ -42,6 +42,11 @@ happens after every database restart. Without it, the server fails with
 "Pool failed to retrieve a connection" after the database restarts. The server refuses to start
 with this setting for any database that isn't on your own machine.
 
+`STEAM_API_KEY` is only needed for Price Is Nice puzzles. Leave it empty and the server runs
+normally, but `GET /games/price-is-nice/puzzle` answers `503 puzzle_unavailable`. To enable it, get
+a key at <https://steamcommunity.com/dev/apikey> and put it in `.env`. It stays on the server; the
+game never sees it.
+
 `.env` is gitignored. Never commit it.
 
 ### 3. Start the database
@@ -316,6 +321,52 @@ Response `200`:
 | 400 | `invalid_before` | `before` isn't a valid `YYYY-MM-DD` date |
 | 404 | `game_not_found` | No game has this slug |
 
+### `GET /games/:slug/puzzle`
+
+Returns the day's puzzle for a game whose puzzle the server picks. Today that is only
+`price-is-nice`: every player gets the same Steam game for a date. No login needed (guests play
+too).
+
+Query parameter, required:
+
+- `puzzleDate`: the UTC date of the puzzle (`YYYY-MM-DD`). Same window as score submission: today,
+  or yesterday during the first hour after midnight UTC.
+
+Response `200`:
+
+```json
+{
+  "puzzle": {
+    "puzzleDate": "2026-11-17",
+    "steamAppId": 620,
+    "name": "Portal 2",
+    "shortDescription": "The \"Perpetual Testing Initiative\" has been expanded...",
+    "price": { "cents": 999, "formatted": "$9.99" },
+    "screenshots": ["https://shared.akamai.steamstatic.com/.../ss_....1920x1080.jpg?t=..."]
+  }
+}
+```
+
+- The game is picked the first time a date is requested, then stored: later requests, and every
+  other player, get the same game. The first request of a day can take several seconds (the server
+  asks Steam); the server picks the next day's game in the background to avoid that.
+- `price` is the US price when the game was picked, including any discount at that moment.
+- `screenshots` are on Steam's CDN, which allows cross-origin requests, so a WebGL build can load
+  them directly. At least one, at most 12.
+- `shortDescription` is plain text (HTML entities already decoded).
+- The response contains the answer (the price). Like scores, this trusts the client.
+- `Cache-Control: public, max-age=300`.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 200 | | Puzzle returned |
+| 400 | `invalid_slug` | Slug isn't 1–64 lowercase letters, digits, or hyphens |
+| 400 | `invalid_puzzle_date` | `puzzleDate` is missing or isn't a valid `YYYY-MM-DD` date |
+| 400 | `puzzle_date_closed` | That day's puzzle isn't available (past, or not yet) |
+| 404 | `game_not_found` | No game has this slug |
+| 404 | `puzzle_not_served` | The game generates its own puzzle (every game except `price-is-nice`) |
+| 503 | `puzzle_unavailable` | The puzzle couldn't be picked right now (Steam unreachable, no `STEAM_API_KEY`); retry shortly |
+
 ### Games
 
 Each Unity game identifies itself by its **slug**. Slugs are permanent: never
@@ -331,6 +382,9 @@ change one after a game uses it.
 
 To add a game, add an entry to the `games` list in `prisma/seed.ts`, run
 `npm run db:seed`, and add it to this table.
+
+Every game except Price Is Nice builds its daily puzzle in Unity from the date. Price Is Nice gets
+its puzzle from `GET /games/price-is-nice/puzzle`.
 
 ## Calling the API from Unity
 
@@ -393,9 +447,11 @@ src/
   auth/                registration, login, sessions, passwords, tokens
   email/               email sending (prints to the console in development) and templates
   games/               game slug validation and lookup
-  scores/              score submission and history
+  scores/              score submission and history; the open puzzle date window
+  puzzles/             server-picked daily puzzles: the Price Is Nice route, picking, Steam client
 .env.example           template for your .env
 DEV_COMMANDS.md        terminal commands for testing and database work
+docs/                  design specs (docs/price-is-nice-puzzle.md)
 ```
 
 ## Troubleshooting
