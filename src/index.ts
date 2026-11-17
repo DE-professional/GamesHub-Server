@@ -1,5 +1,6 @@
 import express from "express"
 import {config} from "./config.js";
+import { cors, describeCors } from "./cors.js";
 import {errorHandler, notFound} from "./errors.js";
 import { authRouter } from "./auth/routes.js";
 import { requireGame } from "./games/lookup.js";
@@ -10,6 +11,10 @@ import { submitScore } from "./scores/submit.js";
 import { getDailyPuzzle } from "./puzzles/routes.js";
 
 const app = express();
+
+// First: preflights are answered before body parsing, and every response (errors included) gets
+// its CORS headers. See src/cors.ts.
+app.use(cors);
 
 // Largest planned body is registration (~3 KB worst case); see PROJECT_CONTEXT.
 app.use(express.json({limit:"16kb"}));
@@ -33,5 +38,6 @@ app.listen(config.PORT,(err)=>{
     if(err) throw err;
     console.log(`Listening on http://localhost:${config.PORT}`);
     console.log(`Email transport: ${config.EMAIL_TRANSPORT}`);
+    console.log(`CORS: ${describeCors()}`);
     console.log(`Price Is Nice puzzles: ${config.STEAM_API_KEY ? "enabled" : "disabled (STEAM_API_KEY not set)"}`);
 });

@@ -47,6 +47,10 @@ normally, but `GET /games/price-is-nice/puzzle` answers `503 puzzle_unavailable`
 a key at <https://steamcommunity.com/dev/apikey> and put it in `.env`. It stays on the server; the
 game never sees it.
 
+`CORS_ORIGINS` and `CORS_ALLOW_LOCALHOST` only matter for a WebGL build, which runs in a browser.
+The Unity Editor ignores CORS, so leave them at their defaults (empty and `false`) unless you are
+testing a WebGL build; see [WebGL builds and CORS](#webgl-builds-and-cors).
+
 `.env` is gitignored. Never commit it.
 
 ### 3. Start the database
@@ -412,7 +416,28 @@ its puzzle from `GET /games/price-is-nice/puzzle`.
   *Project Settings → Player → Other Settings → Allow downloads over HTTP* to
   *Allowed in Development Builds*.
 - Test in the Unity Editor against a local server. A WebGL build runs in a browser, which
-  requires HTTPS and CORS; those come with the hosted server.
+  needs CORS (below) and, once it is hosted over HTTPS, an HTTPS API.
+
+### WebGL builds and CORS
+
+A WebGL build runs on a web page (on itch.io, a page on an itch.zone domain), and the browser only
+lets that page call this API if the API allows the page's **origin** (scheme, host and port, e.g.
+`https://html-classic.itch.zone`). The server does this with CORS headers, configured in `.env`:
+
+- `CORS_ORIGINS`: comma-separated exact origins, e.g.
+  `CORS_ORIGINS=https://html-classic.itch.zone`. `https` only, except for local hosts; no path and
+  no trailing slash. The server refuses to start with a malformed entry.
+- `CORS_ALLOW_LOCALHOST=true` (development only): also allows `http://localhost` on any port. Unity's
+  *File → Build and Run* for WebGL serves the build from `http://localhost` on a port that changes
+  every time. Refused unless the database is local.
+
+The server logs its CORS setting at startup, and logs each rejected origin once:
+`CORS: rejected origin "https://..."; add it to CORS_ORIGINS to allow it`. To find the real origin
+of a deployment, open the game there and look for that line.
+
+A page served over `https` can't call an `http://` API at all (mixed content), whatever the CORS
+settings: a hosted WebGL build needs the hosted, HTTPS API. A local `http://localhost` build can call
+a local server.
 
 ## Changing the database schema
 
