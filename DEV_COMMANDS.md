@@ -130,6 +130,21 @@ dbq "SELECT puzzle_date, steam_app_id, name, price_formatted, JSON_LENGTH(screen
 dbq "DELETE FROM price_is_nice_puzzles WHERE puzzle_date = '$D';"
 ```
 
+## CORS
+
+The browser sends a preflight `OPTIONS` before a JSON `POST` or any request with `Authorization`.
+To see what it gets back (replace the origin with one from `CORS_ORIGINS`):
+
+```sh
+# Preflight: allowed → 204 with Access-Control-Allow-Origin/-Methods/-Headers; otherwise 204 without them
+curl -s -o /dev/null -D - -X OPTIONS -H 'Origin: https://html-classic.itch.zone' \
+  -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization, content-type' \
+  "$GAMESHUB_URL/games/sudoku/scores"
+
+# A normal request from that origin: Access-Control-Allow-Origin on success and on errors
+curl -s -D - -H 'Origin: https://html-classic.itch.zone' "$GAMESHUB_URL/auth/me"
+```
+
 ## Score history test data
 
 `submit` only accepts today's date, so older scores are inserted with SQL. Register and log in

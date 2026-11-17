@@ -186,9 +186,9 @@ The checks run in this order; the first one that fails decides the response:
 - **Rotate the key.** The key in the Unity repo's history is public. Revoke it on
   <https://steamcommunity.com/dev/apikey>, create a new one, and set it only in the server's
   environment.
-- **CORS is still required for WebGL.** Steam no longer has to allow cross-origin requests, but
-  the GamesHub API does. That's the step 6 release blocker; until it's done, a WebGL build can't
-  reach this endpoint either.
+- **CORS for WebGL.** Steam no longer has to allow cross-origin requests, but the GamesHub API
+  does. That's done (decisions 44–50 in `PROJECT_CONTEXT.md`); a deployment only needs its page's
+  origin in `CORS_ORIGINS`.
 - **Re-picking a day** (development only; players who already saw the old game would disagree):
   `dbq "DELETE FROM price_is_nice_puzzles WHERE puzzle_date = 'YYYY-MM-DD';"`
 

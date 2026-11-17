@@ -54,6 +54,7 @@ src/
   index.ts             Express app and routes; mounts authRouter at /auth, GET /games/:slug,
                        POST /games/:slug/scores, GET /games/:slug/scores/me
   config.ts            loads .env if present, validates all env vars with zod, exports `config`
+  cors.ts              CORS middleware (allowed origins from config, preflights, Vary: Origin)
   db.ts                single shared PrismaClient, built with the MariaDB adapter
   errors.ts            HttpError, notFound, errorHandler (also maps body-parser errors),
                        describeError, uniqueViolationIndex
@@ -96,7 +97,8 @@ src/
                        MYSQL_PASSWORD, DATABASE_URL (mysql://...@127.0.0.1:3306/GamesHub), PORT=3900,
                        DB_ALLOW_PUBLIC_KEY_RETRIEVAL=true (local Docker only, see Prisma 7 notes),
                        EMAIL_TRANSPORT=console, EMAIL_VERIFICATION_URL=http://localhost:3900/verify-email,
-                       STEAM_API_KEY (optional; empty disables Price Is Nice puzzles)
+                       STEAM_API_KEY (optional; empty disables Price Is Nice puzzles),
+                       CORS_ORIGINS (empty), CORS_ALLOW_LOCALHOST=false
 README.md, DEV_COMMANDS.md, docs/price-is-nice-puzzle.md
 ```
 
@@ -145,6 +147,10 @@ After pulling: `npm install`, `npx prisma migrate dev`, `npx prisma generate`, `
     fetch Steam's app list for Price Is Nice; never sent to clients. Optional so teammates can run
     the server without a Steam key: when unset, the puzzle endpoint answers `503 puzzle_unavailable`.
     The server logs at startup whether Price Is Nice puzzles are enabled.
+  - `CORS_ORIGINS`: comma-separated, default empty; each entry must equal its own `new URL(x).origin`
+    (no path, trailing slash or uppercase) and be `https`, or `http` on a local host.
+  - `CORS_ALLOW_LOCALHOST`: `z.stringbool()`, default false. `refine`: only with a local database,
+    like `DB_ALLOW_PUBLIC_KEY_RETRIEVAL`.
   - Side effect: `prisma/seed.ts` imports `src/db.js`, which imports `config.ts`, so seeding
     needs the full app config, not just `DATABASE_URL`.
 - **CLI (`prisma.config.ts`):** its own `loadEnvFile` guard plus Prisma's `env("DATABASE_URL")`.
@@ -585,6 +591,30 @@ Full request/response/error reference for clients: README.md. Implementation not
     (verified November 17), so WebGL loads them directly. `shortDescription` has its HTML entities
     decoded server-side in one pass (`&amp;quot;` → `&quot;`, not `"`).
 
+### CORS, decided and built November 17, 2026
+
+44. **Hand-written middleware (`src/cors.ts`), not the `cors` package:** ~60 lines, the rules in one
+    place, no dependency. Mounted first, before `express.json`, so preflights never reach body
+    parsing or routes, and every response (errors included) carries the headers: the game must be
+    able to read `error.code` from a cross-origin 4xx.
+45. **Exact origins from `CORS_ORIGINS`**, no wildcards and no `*`. The allowed origin is echoed in
+    `Access-Control-Allow-Origin`. Empty by default: the Editor and curl don't need CORS, and a
+    deployment has to name its pages. Malformed entries stop the server at startup.
+46. **`CORS_ALLOW_LOCALHOST` for development:** Unity's WebGL *Build and Run* serves from
+    `http://localhost` on a port that changes every run, so exact origins can't cover it. The switch
+    allows `http` on `localhost`, `127.0.0.1`, `[::1]` and any port, and is refused with a non-local
+    database.
+47. **Preflights** (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) → `204` for every
+    origin; only allowed ones get `Allow-Methods: GET, POST, PUT, DELETE`,
+    `Allow-Headers: Authorization, Content-Type` and `Max-Age: 600`. An `OPTIONS` without those
+    headers isn't a preflight and falls through to the routes (404).
+48. **No `Access-Control-Allow-Credentials`:** the API uses bearer tokens, not cookies.
+49. **`Vary: Origin` on every response:** the puzzle response is publicly cacheable (decision 42),
+    and a shared cache must not serve one origin's copy (with its Allow-Origin) to another.
+50. **Rejected origins are logged once each** (at most 100 distinct, quoted with `JSON.stringify`
+    because the header is client-controlled). This is how to find itch.io's real game origin: open
+    the game there and read the log.
+
 ### Unique violations (P2002) with the MariaDB adapter (measured on 7.10.1)
 
 - Unique violations are `PrismaClientKnownRequestError` with code `P2002`; `meta.target` is absent.
@@ -628,8 +658,8 @@ Deferred by the November 3 priority change; none blocks client development again
 
 - Step 4: email verification endpoint, password reset, real email sender; address squatting and
   the unverified-login decision (12).
-- Step 6: rate limiting on auth endpoints (login is open to password guessing until then), CORS
-  for WebGL (Price Is Nice can't work in WebGL without it either), security headers.
+- Step 6: rate limiting on auth endpoints (login is open to password guessing until then), security
+  headers. (CORS is done, decisions 44–50; production still needs its real origin in `CORS_ORIGINS`.)
 - Rotate `STEAM_API_KEY`: the original key is public in the Unity repo's history. Production gets a
   new key, set only on the server.
 - Step 7: server Docker image, production database user, TLS to the database, `migrate deploy`.
@@ -726,6 +756,13 @@ Clean up with the `@example.com` delete afterwards.
   today's row and send 5 requests at once → all 200 with the same game, exactly one row.
   A second instance with `PORT=3901 STEAM_API_KEY=` logs "disabled" at startup and answers 503
   `puzzle_unavailable` for a date with no row. Not yet exercised: Steam unreachable, and the cooldown.
+- **CORS** (verified November 17, 2026, on a second instance with `CORS_ORIGINS` of two https
+  origins and `CORS_ALLOW_LOCALHOST=true`): preflight from an allowed origin → 204 with
+  Allow-Origin/-Methods/-Headers/Max-Age; from another origin → 204 with only `Vary: Origin` and one
+  log line; allowed GET → Allow-Origin; a 401 from an allowed origin → Allow-Origin; any
+  `http://localhost` port allowed; `https://localhost` and `null` rejected; no `Origin` → unchanged
+  apart from `Vary`; `OPTIONS` without preflight headers → 404. Startup refused for a trailing
+  slash, a path, `http` on a public host, and `CORS_ALLOW_LOCALHOST` with a remote `DATABASE_URL`.
 - **Schema constraints:** raw inserts into `scores` with score `-1` fail (out of range); a duplicate
   (user, game, date) fails on the unique key; deleting a game with scores fails (RESTRICT);
   deleting the user cascades.
@@ -748,9 +785,9 @@ Clean up with the `@example.com` delete afterwards.
 6. **Next:** email verification endpoint and password reset (real email sender behind the interface);
    settle the open questions on links, address squatting, and unverified login first.
    Called "step 4" in the decisions and release blockers above.
-7. Hardening ("step 6" above): rate limiting on auth endpoints, security headers, CORS for WebGL;
-   breached-password check; cleanup of expired sessions and tokens. Pull CORS forward if the
-   WebGL client needs testing before then.
+7. Hardening ("step 6" above): rate limiting on auth endpoints, security headers, ~~CORS for WebGL~~
+   (done November 17, 2026, decisions 44–50); breached-password check; cleanup of expired sessions
+   and tokens.
 8. ("Step 7" above) Dockerfile for the server (placeholder `DATABASE_URL` for `prisma generate`; confirm argon2's
    native binary works in the image); production database user, TLS to the database,
    and `prisma migrate deploy`
@@ -762,9 +799,11 @@ Client-side obligations are tracked in CLIENT_TODO.md (Unity repo). Background:
 - **The Editor and WebGL builds behave differently.** In the Editor, Unity makes the request itself;
   in WebGL the browser makes it and enforces CORS and mixed-content rules. Local development uses
   the Editor against a local server, which needs neither. Test the WebGL build against the hosted API.
-- **CORS:** a JSON `POST` triggers a preflight `OPTIONS`, which currently gets 404. The allowed
-  origin must be the page that runs the game; on itch.io that is likely an itch.zone domain, not
-  itch.io. Confirm by logging the `Origin` header from the real build.
+- **CORS:** a JSON `POST` (and any request with `Authorization`) triggers a preflight `OPTIONS`,
+  answered by `src/cors.ts` (decisions 44–50). The allowed origin must be the page that runs the
+  game; on itch.io that is an itch.zone domain, not itch.io. Not yet confirmed: run the real build
+  and read the "CORS: rejected origin" log line, then add it to `CORS_ORIGINS`. For a local WebGL
+  build, set `CORS_ALLOW_LOCALHOST=true`.
 - **HTTPS:** an HTTPS page cannot call an `http://` API, so a WebGL build can only use the hosted API.
 - **Content-Type:** older `UnityWebRequest.Post(url, string)` sends form-encoded data, which gets
   `415`. The `UploadHandlerRaw` pattern (with `Content-Type`, `Authorization`, and `timeout = 15`)

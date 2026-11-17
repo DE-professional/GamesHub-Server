@@ -6,6 +6,19 @@ try{
     if((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 }
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+// A browser origin: scheme, host and optional port, nothing else ("https://html.itch.zone").
+// https only, except for local hosts (a local WebGL build is served over http).
+function isAllowedOriginSyntax(value: string): boolean {
+    let url: URL;
+    try {
+        url = new URL(value);
+    } catch {
+        return false;
+    }
+    if (url.origin !== value) return false; // rejects paths, trailing slashes, credentials, uppercase
+    return url.protocol === "https:" || (url.protocol === "http:" && LOCAL_HOSTS.has(url.hostname));
+}
 const envSchema = z.object({
     DATABASE_URL: z.url({protocol: /^mysql$/}),
     PORT: z.coerce.number().int().min(1).max(65535).default(3900),
@@ -19,6 +32,24 @@ const envSchema = z.object({
         (value) => (value === "" ? undefined : value),
         z.string().regex(/^[A-Za-z0-9]{16,64}$/).optional(),
     ),
+    // Web pages allowed to call the API from a browser (the WebGL build): comma-separated exact
+    // origins. Empty (the default) sends no CORS headers; the Unity Editor doesn't need any.
+    CORS_ORIGINS: z
+        .string()
+        .default("")
+        .transform((value) => value.split(",").map((origin) => origin.trim()).filter((origin) => origin !== ""))
+        .pipe(
+            z.array(
+                z.string().refine(isAllowedOriginSyntax, {
+                    message:
+                        "each CORS_ORIGINS entry must be an origin like https://example.com " +
+                        "(no path or trailing slash; http only for localhost)",
+                }),
+            ),
+        ),
+    // Development only: also allow http://localhost on any port, for Unity's WebGL "Build and Run",
+    // whose port changes between runs.
+    CORS_ALLOW_LOCALHOST: z.stringbool().default(false),
 
 })
 .refine(
@@ -36,6 +67,12 @@ const envSchema = z.object({
     {
         message: "EMAIL_VERIFICATION_URL must use https unless it points at a local host",
         path: ["EMAIL_VERIFICATION_URL"],
+    },
+).refine(
+    (env) => !env.CORS_ALLOW_LOCALHOST || LOCAL_HOSTS.has(new URL(env.DATABASE_URL).hostname),
+    {
+        message: "CORS_ALLOW_LOCALHOST may only be enabled for a local database",
+        path: ["CORS_ALLOW_LOCALHOST"],
     },
 );
 
