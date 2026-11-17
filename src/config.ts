@@ -11,7 +11,14 @@ const envSchema = z.object({
     PORT: z.coerce.number().int().min(1).max(65535).default(3900),
     DB_ALLOW_PUBLIC_KEY_RETRIEVAL: z.stringbool().default(false),
     EMAIL_TRANSPORT: z.enum(["console"]),
-    EMAIL_VERIFICATION_URL: z.url({protocol: /^https?$/})
+    EMAIL_VERIFICATION_URL: z.url({protocol: /^https?$/}),
+    // Steam Web API key, used to fetch the app list for Price Is Nice. Server-side only: never
+    // send it to clients. Optional so teammates can run the server without one: when unset (or
+    // empty), the puzzle endpoint answers 503 puzzle_unavailable.
+    STEAM_API_KEY: z.preprocess(
+        (value) => (value === "" ? undefined : value),
+        z.string().regex(/^[A-Za-z0-9]{16,64}$/).optional(),
+    ),
 
 })
 .refine(

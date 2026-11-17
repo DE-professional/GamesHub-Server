@@ -1,7 +1,7 @@
 # GamesHub Server: Project Context
 
 Current state, decisions, and conventions for the GamesHub backend.
-Last updated: November 5, 2026.
+Last updated: November 17, 2026.
 
 ## What it is
 
@@ -27,11 +27,13 @@ for development and testing (setup in README.md) but don't add backend features.
 - `README.md` (repo): setup, day-to-day commands, troubleshooting, and the **API reference**
   (every endpoint's request, response, and error codes). Update it whenever an endpoint changes.
 - `DEV_COMMANDS.md` (repo): shell helpers (`dbq`, `dbsh`, `reg`, `signin`, `loginas`, `me`,
-  `signout`, `submit`, `myscores`, `tokhash`), date commands, an example session, score-history
-  test data, database and Prisma commands. Verification procedures below use these helpers.
+  `signout`, `submit`, `myscores`, `puzzle`, `tokhash`), date commands, an example session,
+  Price Is Nice puzzle commands, score-history test data, database and Prisma commands. Verification procedures below use these helpers.
 - `CLIENT_TODO.md` (Unity repo): client-side requirements that come from backend decisions and
   that the server can't enforce (UTC puzzle dates, win score ≥ 1, one attempt per day, ...).
   Add to it whenever a backend decision creates a client obligation.
+- `docs/price-is-nice-puzzle.md` (repo): design spec for server-picked Price Is Nice puzzles
+  (decisions 35–43), including the client side.
 - `PROJECT_CONTEXT.md` (this file, Claude Project knowledge).
 
 ## Project structure
@@ -45,7 +47,8 @@ prisma.config.ts       Prisma CLI config: schema path, migrations path, seed com
 prisma/
   schema.prisma        generator "prisma-client" → ../src/generated/prisma; datasource has no url
   migrations/          init (games), add_users (+ hand-added CHECK constraint),
-                       add_email_verification_tokens, add_sessions, add_scores
+                       add_email_verification_tokens, add_sessions, add_scores,
+                       add_price_is_nice_puzzles
   seed.ts              idempotent upsert loop over a `games` list; imports `prisma` from src/db.js
 src/
   index.ts             Express app and routes; mounts authRouter at /auth, GET /games/:slug,
@@ -77,16 +80,24 @@ src/
     lookup.ts          requireGame(slug) → { id, slug, name } or 404 game_not_found; used by every
                        games route
   scores/
-    dates.ts           toUtcDateString / fromUtcDateString ("YYYY-MM-DD" ⇄ Date at midnight UTC)
+    dates.ts           toUtcDateString / fromUtcDateString ("YYYY-MM-DD" ⇄ Date at midnight UTC),
+                       openPuzzleDates (today + grace; shared by submit and puzzles), nextUtcDateString
     response.ts        scoreResponse (shared by submit and history)
     submit.ts          POST /games/:slug/scores
     history.ts         GET /games/:slug/scores/me (query parsing for limit/before, keyset pagination)
+  puzzles/
+    routes.ts          GET /games/:slug/puzzle (only price-is-nice is served)
+    price-is-nice.ts   getPriceIsNicePuzzle (find, or pick + store once per date), prefetch, response
+                       builder, selection rules (NSFW, USD price, screenshots)
+    steam.ts           Steam client: fetchAppIds (GetAppList, paged), fetchAppDetails (appdetails,
+                       cc=us), zod-validated, retries; SteamUnavailableError
   generated/prisma/    generated Prisma client (gitignored; run `npx prisma generate`)
 .env / .env.example    MYSQL_ROOT_PASSWORD, MYSQL_DATABASE=GamesHub, MYSQL_USER=GamesHub,
                        MYSQL_PASSWORD, DATABASE_URL (mysql://...@127.0.0.1:3306/GamesHub), PORT=3900,
                        DB_ALLOW_PUBLIC_KEY_RETRIEVAL=true (local Docker only, see Prisma 7 notes),
-                       EMAIL_TRANSPORT=console, EMAIL_VERIFICATION_URL=http://localhost:3900/verify-email
-README.md, DEV_COMMANDS.md
+                       EMAIL_TRANSPORT=console, EMAIL_VERIFICATION_URL=http://localhost:3900/verify-email,
+                       STEAM_API_KEY (optional; empty disables Price Is Nice puzzles)
+README.md, DEV_COMMANDS.md, docs/price-is-nice-puzzle.md
 ```
 
 npm scripts: `dev` (tsx watch src/index.ts), `typecheck` (tsc --noEmit), `db:seed` (prisma db seed).
@@ -130,6 +141,10 @@ After pulling: `npm install`, `npx prisma migrate dev`, `npx prisma generate`, `
     verification emails; the token is added as a query parameter by `buildVerificationUrl`.
     `refine`: must be `https` unless the host is local (an `http` link would send tokens unencrypted).
     The target path does not exist until step 4.
+  - `STEAM_API_KEY`: optional (empty string counts as unset), `^[A-Za-z0-9]{16,64}$`. Used only to
+    fetch Steam's app list for Price Is Nice; never sent to clients. Optional so teammates can run
+    the server without a Steam key: when unset, the puzzle endpoint answers `503 puzzle_unavailable`.
+    The server logs at startup whether Price Is Nice puzzles are enabled.
   - Side effect: `prisma/seed.ts` imports `src/db.js`, which imports `config.ts`, so seeding
     needs the full app config, not just `DATABASE_URL`.
 - **CLI (`prisma.config.ts`):** its own `loadEnvFile` guard plus Prisma's `env("DATABASE_URL")`.
@@ -232,6 +247,24 @@ as equal. Shared code in `src/auth/tokens.ts`; each token type only supplies its
   and returns the date without a timezone shift.
 - No leaderboard index yet: design it with the leaderboard query.
 
+**PriceIsNicePuzzle** (`price_is_nice_puzzles`), added November 17, 2026
+(migration `add_price_is_nice_puzzles`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | Int PK autoincrement | never exposed |
+| `puzzle_date` | Date, unique | `price_is_nice_puzzles_puzzle_date_key` |
+| `steam_app_id` | Int UNSIGNED | |
+| `name` | VarChar(255) | trimmed; games with longer names are skipped when picking |
+| `short_description` | Text | HTML entities decoded |
+| `price_cents` | Int UNSIGNED | US price at pick time, after any discount; > 0 |
+| `price_formatted` | VarChar(32) | Steam's string, e.g. `$9.99` |
+| `screenshots` | Json | array of 1–12 https URLs on Steam's CDN |
+| `created_at` | DateTime(3) | when the game was picked |
+
+- One row per date, written once and never edited (decision 40). No game FK: only Price Is Nice
+  has server-picked puzzles; a second such game would get its own table or a `game_id` column.
+
 ## API so far
 
 Full request/response/error reference for clients: README.md. Implementation notes:
@@ -259,6 +292,11 @@ Full request/response/error reference for clients: README.md. Implementation not
   page, or `null` when nothing older exists. Check order: 401 → `invalid_slug` → `invalid_limit` /
   `invalid_before` → `404 game_not_found`. Empty history is `200` with `[]` and `null`.
   Decisions 25–34.
+- `GET /games/:slug/puzzle?puzzleDate=YYYY-MM-DD` (no login) →
+  `200 { puzzle: { puzzleDate, steamAppId, name, shortDescription, price: { cents, formatted }, screenshots } }`,
+  `Cache-Control: public, max-age=300`. Check order: `invalid_slug` → `invalid_puzzle_date` →
+  `400 puzzle_date_closed` (same window as submit) → `404 game_not_found` → `404 puzzle_not_served`
+  (any game but price-is-nice) → `503 puzzle_unavailable`. Decisions 35–43.
 - Protected endpoints: `401 authentication_required` (no header) or `401 invalid_token`
   (malformed, unknown, or expired), always with `WWW-Authenticate: Bearer` (RFC 6750).
 - Non-JSON body on a JSON endpoint → `415 unsupported_media_type` (`requireJson` middleware).
@@ -508,13 +546,53 @@ Full request/response/error reference for clients: README.md. Implementation not
 34. **`Cache-Control: no-store`:** per-player data that changes on submit; a WebGL browser must not
     reuse a stale copy right after a submission.
 
+### Price Is Nice puzzles, decided and built November 17, 2026
+
+35. **The server picks Price Is Nice's game** and stores it per date; every player gets the stored
+    pick. Reasons: a WebGL build can't call the Steam store API (it sends no CORS headers, verified),
+    the Steam API key was shipped in the client, and client-side picking gave different players
+    different games (each device cached its own copy of the app list, network failures shifted the
+    seeded random walk, and non-US players got non-USD prices that were then rejected). With the
+    pick stored, it needs no seed: `crypto.randomInt`.
+36. **Picked on first request, once:** concurrent first requests share one in-process promise per
+    date; across processes, the unique index decides (insert first, on P2002 read the winner's row,
+    as for scores). **Look-ahead:** serving today's puzzle starts tomorrow's pick in the background,
+    so the first player after midnight doesn't wait for Steam. Rejected: a scheduled midnight job
+    (needs a scheduler in production; the look-ahead gets the same result).
+37. **Route `GET /games/:slug/puzzle?puzzleDate=`**, generic so other games could get server puzzles
+    later; today every slug but `price-is-nice` gets `404 puzzle_not_served`. No login (guests play).
+    Same open-date window as score submission (`openPuzzleDates`, now shared in `scores/dates.ts`),
+    so tomorrow's game can't be peeked. Past puzzles aren't served (none needed yet). Query parameter
+    named `puzzleDate`, like the submit body; errors reuse `invalid_puzzle_date` / `puzzle_date_closed`.
+38. **Selection rules:** requests use `cc=us&l=english`; a game needs `price_overview` with currency
+    `USD` and `final > 0` (stored in cents, no string parsing), at least one screenshot (at most 12
+    stored), and a name of at most 255 characters. NSFW filter: content descriptors 1, 3, 4, 5
+    (4, "frequent nudity or sexual content", was missing in the Unity version), `required_age` ≥ 17
+    (a number in practice; the Unity version compared it with strings, so it never matched), and the
+    genres Nudity, Sexual Content, Erotic, Anime, Romance. Up to 60 random candidates per pick (Steam
+    allows ~200 store requests per 5 minutes). The app list (all pages of `GetAppList`, games only)
+    is cached in memory for 24 hours.
+39. **Steam requests:** 20 s timeout; network errors, timeouts, 429 and 5xx retried 3 times with
+    1 s / 2 s back-off; other 4xx not retried. Every response is zod-validated. Error messages never
+    contain URLs (the app list URL carries the key).
+40. **Price fixed at pick time**, including any discount at that moment; never refreshed, so the
+    answer can't change during the day.
+41. **Failures → `503 puzzle_unavailable`**, logged once per failed pick (not per request). After a
+    failed pick, the same date answers 503 immediately for 60 s instead of asking Steam again.
+42. **The response contains the answer** (the price). Accepted: consistent with client-reported
+    scores (decision 17). `Cache-Control: public, max-age=300` (same for everyone, fixed once picked).
+43. **Screenshots are Steam CDN URLs, not proxied:** the CDN sends `Access-Control-Allow-Origin: *`
+    (verified November 17), so WebGL loads them directly. `shortDescription` has its HTML entities
+    decoded server-side in one pass (`&amp;quot;` → `&quot;`, not `"`).
+
 ### Unique violations (P2002) with the MariaDB adapter (measured on 7.10.1)
 
 - Unique violations are `PrismaClientKnownRequestError` with code `P2002`; `meta.target` is absent.
 - The index name is at `meta.driverAdapterError.cause.constraint.index`, read by
   `uniqueViolationIndex` (`src/errors.ts`; returns the name, `"unrecognized"` for an unknown P2002
   shape, or `undefined` for other errors). Known names: `users_email_key`,
-  `users_display_name_discriminator_key`, `scores_user_id_game_id_puzzle_date_key`.
+  `users_display_name_discriminator_key`, `scores_user_id_game_id_puzzle_date_key`,
+  `price_is_nice_puzzles_puzzle_date_key`.
 - `meta.driverAdapterError.cause.originalMessage` is MySQL's text and **contains the duplicate value**,
   e.g. the email address. Never log these errors raw.
 - The shape is adapter-specific and undocumented; re-run the registration and score tests after any
@@ -539,6 +617,9 @@ Full request/response/error reference for clients: README.md. Implementation not
 - Leaderboard design (query, index, version filtering) when a leaderboard screen is needed.
 - Server-side score validation per game (puzzle generation options 2 or 3), if ever: would need
   the generator in TypeScript and probably a daily-puzzle table (seed + generator version).
+  Price Is Nice already has its puzzle on the server (decisions 35–43).
+- Whether Steam's terms allow store data in a hosted public game (names, prices, screenshots), and
+  whether the store API's rate limits hold up in production (one pick per day should be far below them).
 - What happens to the hosted service after the semester ends.
 
 ## Release blockers (before public hosting)
@@ -548,7 +629,9 @@ Deferred by the November 3 priority change; none blocks client development again
 - Step 4: email verification endpoint, password reset, real email sender; address squatting and
   the unverified-login decision (12).
 - Step 6: rate limiting on auth endpoints (login is open to password guessing until then), CORS
-  for WebGL, security headers.
+  for WebGL (Price Is Nice can't work in WebGL without it either), security headers.
+- Rotate `STEAM_API_KEY`: the original key is public in the Unity repo's history. Production gets a
+  new key, set only on the server.
 - Step 7: server Docker image, production database user, TLS to the database, `migrate deploy`.
 
 ## Prisma 7 notes (upgrade complete)
@@ -635,6 +718,14 @@ Clean up with the `@example.com` delete afterwards.
     plans use `scores_user_id_game_id_puzzle_date_key` (`ref` without `before`, `range` with it),
     `Extra` shows `Backward index scan`, and there is no `Using filesort`. Don't use `FORCE INDEX`
     to "pass" this check: the real query has no hint.
+- **Price Is Nice puzzles** (`puzzle`, verified November 17, 2026): `puzzleDate` missing, `2026-13-01`,
+  or repeated → 400 `invalid_puzzle_date`; two days ago and tomorrow → 400 `puzzle_date_closed`;
+  `Bad_Slug` → `invalid_slug`; `nope` → 404 `game_not_found`; `sudoku` → 404 `puzzle_not_served`.
+  Today → 200 in ~12 s the first time after a server start (app list download), then ~10 ms with
+  `Cache-Control: public, max-age=300`; tomorrow's row appears within a second (look-ahead). Delete
+  today's row and send 5 requests at once → all 200 with the same game, exactly one row.
+  A second instance with `PORT=3901 STEAM_API_KEY=` logs "disabled" at startup and answers 503
+  `puzzle_unavailable` for a date with no row. Not yet exercised: Steam unreachable, and the cooldown.
 - **Schema constraints:** raw inserts into `scores` with score `-1` fail (out of range); a duplicate
   (user, game, date) fails on the unique key; deleting a game with scores fails (RESTRICT);
   deleting the user cascades.
@@ -652,6 +743,8 @@ Clean up with the `@example.com` delete afterwards.
    - ~~Score history, `GET /games/:slug/scores/me`~~ (built November 4, verified November 5, 2026).
      The client-usable API is complete; client work can start against a local server (CLIENT_TODO.md).
    - Later: leaderboards (index design, ranking per decision 23, version filtering)
+   - ~~Price Is Nice puzzles, `GET /games/:slug/puzzle`~~ (done November 17, 2026; decisions 35–43,
+     docs/price-is-nice-puzzle.md)
 6. **Next:** email verification endpoint and password reset (real email sender behind the interface);
    settle the open questions on links, address squatting, and unverified login first.
    Called "step 4" in the decisions and release blockers above.
@@ -685,12 +778,16 @@ Client-side obligations are tracked in CLIENT_TODO.md (Unity repo). Background:
 - **Session tokens:** stored by the game (WebGL `PlayerPrefs` is backed by IndexedDB), sent as
   `Authorization: Bearer`. On any 401, discard and show login; on logout, discard regardless of the
   response. `GET /auth/me` checks a stored token at startup.
-- **Puzzle dates:** Unity picks the daily puzzle by the UTC date and submits that date.
+- **Puzzle dates:** Unity picks the daily puzzle by the UTC date and submits that date. Exception:
+  Price Is Nice gets its game from `GET /games/price-is-nice/puzzle` (the main menu preloads it).
 - **Score history:** one request per game. The history screen follows `nextBefore` until it's `null`,
   keeps only the current formula version's scores, then sorts by date or score (stable sort, date
   as tiebreaker). Before starting a puzzle, `?limit=1` tells whether today's was already played.
 
 ## Working style
+
+Since November 17, 2026, Claude Code also works in this repository directly (it built the Price Is
+Nice puzzles). The notes below describe the original Claude Project workflow.
 
 The developer is building this step by step to understand every piece: explain each
 step and the reasoning behind it, have them run commands themselves, and verify results

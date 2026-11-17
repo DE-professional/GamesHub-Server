@@ -5,16 +5,13 @@ import { prisma } from "../db.js";
 import { describeError, HttpError, uniqueViolationIndex } from "../errors.js";
 import { requireGame } from "../games/lookup.js";
 import { parseSlug } from "../games/slug.js";
-import { fromUtcDateString, toUtcDateString } from "./dates.js";
+import { fromUtcDateString, openPuzzleDates } from "./dates.js";
 import { scoreResponse } from "./response.js";
 
 const SCORE_INDEX = "scores_user_id_game_id_puzzle_date_key";
 
 //Cap max score
 const MAX_SCORE = 1_000_000;
-
-//So that puzzles completed shortly after the rollover aren't rejected
-const GRACE_PERIOD_MS = 60 * 60 * 1000;
 
 const submitSchema = z.object({
     puzzleDate: z.iso.date(),
@@ -27,11 +24,6 @@ const FIELD_ERRORS = new Map([
     ["score", { code: "invalid_score", message: `score must be an integer from 0 to ${MAX_SCORE}` }],
     ["formulaVersion", { code: "invalid_formula_version", message: "formulaVersion must be an integer from 1 to 65535" }],
 ]);
-
-// UTC dates that accept submissions right now: today, plus yesterday during the grace period.
-function openPuzzleDates(now:Date): Set<string>{
-    return new Set([toUtcDateString(now), toUtcDateString(new Date(now.getTime() - GRACE_PERIOD_MS))]);
-}
 
 export const submitScore: RequestHandler = async (req, res) => {
     const { user } = await authenticate(req, res);
