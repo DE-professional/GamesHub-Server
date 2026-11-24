@@ -71,6 +71,16 @@ export async function authenticate(req: Request, res: Response): Promise<Authent
     };
 }
 
+// For endpoints that guests can use but that add something for a logged-in player: no
+// Authorization header means a guest (null); a header that is present must be valid (401 otherwise),
+// so a client with an expired token learns to log in again instead of silently seeing guest data.
+export async function authenticateOptional(req: Request, res: Response): Promise<AuthenticatedSession | null> {
+    if (req.get("Authorization") === undefined) {
+        return null;
+    }
+    return authenticate(req, res);
+}
+
 // The user object in API responses (login, /auth/me). Built field by field; no id.
 export function userResponse(user: Omit<SessionUser, "id">) {
     return {

@@ -1,11 +1,13 @@
 import {prisma} from "../src/db.js";
 
+// currentFormulaVersion: the version clients currently submit for the game. Leaderboards rank
+// only scores with this version. Bump it here (and re-run the seed) when a formula changes.
 const games = [
-    { slug: "minesweeper", name: "Minesweeper" },
-    { slug: "blackjack", name: "Blackjack" },
-    { slug: "price-is-nice", name: "Price Is Nice" },
-    { slug: "runner", name: "Runner" },
-    { slug: "sudoku", name: "Sudoku" },
+    { slug: "minesweeper", name: "Minesweeper", currentFormulaVersion: 1 },
+    { slug: "blackjack", name: "Blackjack", currentFormulaVersion: 1 },
+    { slug: "price-is-nice", name: "Price Is Nice", currentFormulaVersion: 1 },
+    { slug: "runner", name: "Runner", currentFormulaVersion: 1 },
+    { slug: "sudoku", name: "Sudoku", currentFormulaVersion: 1 },
 ];
 
 
@@ -13,7 +15,7 @@ async function main(){
     for (const game of games){
         await prisma.game.upsert({
             where:{slug: game.slug},
-            update: {name: game.name},
+            update: {name: game.name, currentFormulaVersion: game.currentFormulaVersion},
             create: game,
         })
     }

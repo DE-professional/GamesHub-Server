@@ -48,6 +48,13 @@ submit() { curl -s -w ' → %{http_code}\n' -X POST "$GAMESHUB_URL/games/$1/scor
 # GET /games/:slug/scores/me with the token in $T; arguments: slug, optional query string.
 myscores() { curl -s -w ' → %{http_code}\n' "$GAMESHUB_URL/games/$1/scores/me${2:+?$2}" -H "Authorization: Bearer $T"; }
 
+# GET /games/:slug/leaderboard/<board>; arguments: slug, board (daily or all-time), optional query
+# string. Sends the token in $T when it is set (fills in "me"); run `unset T` to see the guest view.
+board() {
+    local url="$GAMESHUB_URL/games/$1/leaderboard/$2${3:+?$3}"
+    if [ -n "$T" ]; then curl -s -w ' → %{http_code}\n' "$url" -H "Authorization: Bearer $T"
+    else curl -s -w ' → %{http_code}\n' "$url"; fi
+}
 # GET /games/:slug/puzzle (no token needed); arguments: slug, puzzle date.
 puzzle() { curl -s -w ' → %{http_code} (%{time_total}s)\n' "$GAMESHUB_URL/games/$1/puzzle?puzzleDate=$2"; }
 
@@ -71,6 +78,8 @@ Notes on calling them:
 - `myscores` takes the query string without the `?`. Quote it, because `&` otherwise means "run in
   the background": `myscores sudoku 'limit=30&before=2026-10-01'`. Use double quotes when it
   contains a variable: `myscores sudoku "limit=1&before=$D"`.
+- `board` takes the query string without the `?`, like `myscores`:
+  `board sudoku daily "puzzleDate=$D&limit=10"`, `board sudoku all-time 'limit=10&offset=10'`.
 - `submit` puts its third and fourth arguments into the JSON as they are, so `'"500"'` sends a
   string and `1.5` sends a decimal, which is useful for testing validation.
 - To see response headers, run the `curl` command from a helper directly with `-i` added.
@@ -192,6 +201,45 @@ EXPLAIN SELECT puzzle_date, score, formula_version, created_at FROM scores
 
 Expected: `key` is `scores_user_id_game_id_puzzle_date_key`, `type` is `ref` then `range`, and
 `Extra` includes `Backward index scan` without `Using filesort`.
+
+## Leaderboard test data
+
+500 players (`lbbulk1@example.com` … `lbbulk500@example.com`, no usable password) with a random
+score in every game for each of the last 60 days; days 46–60 use formula version 2, so they must
+not appear on any board (about 150,000 rows):
+
+```sh
+dbq "SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO users (email, password_hash, display_name, discriminator, updated_at)
+WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 500)
+SELECT CONCAT('lbbulk', i, '@example.com'), 'not-a-real-hash', CONCAT('Bulk', i), 1000 + i, UTC_TIMESTAMP(3) FROM n;
+INSERT INTO scores (user_id, game_id, puzzle_date, score, formula_version, created_at)
+WITH RECURSIVE d (k) AS (SELECT 1 UNION ALL SELECT k + 1 FROM d WHERE k < 60)
+SELECT u.id, g.id, UTC_DATE() - INTERVAL d.k DAY, FLOOR(RAND() * 5000), IF(d.k > 45, 2, 1),
+       UTC_TIMESTAMP(3) - INTERVAL d.k DAY + INTERVAL FLOOR(RAND() * 80000) SECOND
+FROM users u CROSS JOIN games g CROSS JOIN d WHERE u.email LIKE 'lbbulk%@example.com';
+ANALYZE TABLE scores;"
+```
+
+Then, for example, `board sudoku daily "puzzleDate=$(date -u -v-3d +%F)&limit=5"` (macOS `date`)
+and `board sudoku all-time 'limit=5&offset=5'`. Remove them with
+`dbq "DELETE FROM users WHERE email LIKE 'lbbulk%@example.com'"` (their scores cascade).
+
+The plans (`EXPLAIN ANALYZE` runs the query and reports actual times):
+
+```sh
+dbq "SET @g = (SELECT id FROM games WHERE slug = 'sudoku'); SET @dd = UTC_DATE() - INTERVAL 3 DAY;
+EXPLAIN ANALYZE SELECT s.id, s.score, RANK() OVER (ORDER BY s.score DESC) AS player_rank FROM scores s
+  WHERE s.game_id = @g AND s.formula_version = 1 AND s.puzzle_date = @dd;
+EXPLAIN ANALYZE SELECT * FROM (SELECT s.user_id, s.score, ROW_NUMBER() OVER (PARTITION BY s.user_id
+  ORDER BY s.score DESC, s.created_at, s.id) AS nth_best FROM scores s
+  WHERE s.game_id = @g AND s.formula_version = 1) best WHERE nth_best = 1;"
+```
+
+Expected: both start from an `Index lookup on s using
+scores_game_id_formula_version_puzzle_date_score_created_at_idx` (daily on game, version and date;
+all-time on game and version). Measured November 24, 2026 with this data: daily ~3 ms (500 rows),
+all-time ~32 ms (22,500 rows). The window functions sort in memory either way; that is expected.
 
 ## Database
 

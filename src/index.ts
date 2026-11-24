@@ -9,6 +9,7 @@ import { requireJson } from "./middleware.js";
 import { getMyScores } from "./scores/history.js";
 import { submitScore } from "./scores/submit.js";
 import { getDailyPuzzle } from "./puzzles/routes.js";
+import { getAllTimeLeaderboard, getDailyLeaderboard } from "./leaderboards/routes.js";
 
 const app = express();
 
@@ -29,6 +30,8 @@ app.get("/games/:slug", async (req, res) => {
 app.post("/games/:slug/scores", requireJson, submitScore);
 app.get("/games/:slug/scores/me", getMyScores);
 app.get("/games/:slug/puzzle", getDailyPuzzle);
+app.get("/games/:slug/leaderboard/daily", getDailyLeaderboard);
+app.get("/games/:slug/leaderboard/all-time", getAllTimeLeaderboard);
 
 app.use(notFound);
 

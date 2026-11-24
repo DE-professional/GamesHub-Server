@@ -17,6 +17,9 @@ model Game {
   id   Int    @id @default(autoincrement())
   slug String @unique @db.VarChar(64)
   name String @db.VarChar(128)
+  // The formula version clients currently submit. Leaderboards rank only scores with this
+  // version (decision 22). Set by prisma/seed.ts; bump it there when a game's formula changes.
+  currentFormulaVersion Int @default(1) @map("current_formula_version") @db.UnsignedInt
   scores Score[]
 
   @@map("games")
@@ -67,6 +70,8 @@ model Score{
   user User @relation(fields:[userId], references:[id], onDelete: Cascade)
   game Game @relation(fields: [gameId], references: [id], onDelete: Restrict)
   @@unique([userId, gameId, puzzleDate])
+  // Leaderboards: filter on game, version and (daily) date, read in rank order.
+  @@index([gameId, formulaVersion, puzzleDate, score(sort: Desc), createdAt])
   @@map("scores")
 }
 // The Price Is Nice game for each puzzle date, picked by the server from Steam the first time

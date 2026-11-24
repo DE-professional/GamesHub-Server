@@ -1,7 +1,7 @@
 # GamesHub Server: Project Context
 
 Current state, decisions, and conventions for the GamesHub backend.
-Last updated: November 17, 2026.
+Last updated: November 24, 2026.
 
 ## What it is
 
@@ -48,7 +48,7 @@ prisma/
   schema.prisma        generator "prisma-client" → ../src/generated/prisma; datasource has no url
   migrations/          init (games), add_users (+ hand-added CHECK constraint),
                        add_email_verification_tokens, add_sessions, add_scores,
-                       add_price_is_nice_puzzles
+                       add_price_is_nice_puzzles, add_leaderboards
   seed.ts              idempotent upsert loop over a `games` list; imports `prisma` from src/db.js
 src/
   index.ts             Express app and routes; mounts authRouter at /auth, GET /games/:slug,
@@ -62,9 +62,10 @@ src/
   auth/
     password.ts        hashPassword / verifyPassword(hash, password) / passwordNeedsRehash
                        (argon2id settings live here)
-    tokens.ts          issueToken(ttlMs) → { token, tokenHash, expiresAt }, hashToken; IssuedToken
+    token.ts           issueToken(ttlMs) → { token, tokenHash, expiresAt }, hashToken; IssuedToken
     verification.ts    createVerificationToken, buildVerificationUrl, VERIFICATION_TOKEN_TTL_HOURS (24)
     sessions.ts        createSessionToken, SESSION_TTL_DAYS (30), authenticate(req, res),
+                       authenticateOptional (guests allowed; leaderboards),
                        userResponse; SessionUser, AuthenticatedSession
     register.ts        POST /auth/register
     login.ts           POST /auth/login
@@ -78,7 +79,7 @@ src/
     templates.ts       verificationEmail, registrationAttemptEmail
   games/
     slug.ts            parseSlug (400 invalid_slug); used by every games route
-    lookup.ts          requireGame(slug) → { id, slug, name } or 404 game_not_found; used by every
+    lookup.ts          requireGame(slug) → { id, slug, name, currentFormulaVersion } or 404 game_not_found; used by every
                        games route
   scores/
     dates.ts           toUtcDateString / fromUtcDateString ("YYYY-MM-DD" ⇄ Date at midnight UTC),
@@ -86,6 +87,10 @@ src/
     response.ts        scoreResponse (shared by submit and history)
     submit.ts          POST /games/:slug/scores
     history.ts         GET /games/:slug/scores/me (query parsing for limit/before, keyset pagination)
+  leaderboards/
+    routes.ts          GET /games/:slug/leaderboard/daily and /all-time (query parsing, optional auth)
+    query.ts           raw SQL: dailyRanked / allTimeRanked ("ranked" subqueries), readPage,
+                       readPlayerEntry, row validation and the entry response builder
   puzzles/
     routes.ts          GET /games/:slug/puzzle (only price-is-nice is served)
     price-is-nice.ts   getPriceIsNicePuzzle (find, or pick + store once per date), prefetch, response
@@ -166,9 +171,11 @@ After pulling: `npm install`, `npx prisma migrate dev`, `npx prisma generate`, `
 Table collation is `utf8mb4_unicode_ci`: comparisons and unique indexes are case-insensitive
 and accent-insensitive.
 
-**Game** (`games`): `id` Int PK autoincrement, `slug` VarChar(64) unique, `name` VarChar(128).
-One row per kind of minigame. Slugs are permanent and are what Unity uses.
-Seeded games: `minesweeper`, `blackjack`, `price-is-nice`, `runner`, `sudoku`.
+**Game** (`games`): `id` Int PK autoincrement, `slug` VarChar(64) unique, `name` VarChar(128),
+`current_formula_version` Int UNSIGNED default 1 (added November 24, 2026, migration
+`add_leaderboards`; decision 53). One row per kind of minigame. Slugs are permanent and are what
+Unity uses. Seeded games: `minesweeper`, `blackjack`, `price-is-nice`, `runner`, `sudoku`, all at
+formula version 1. The seed is the source of truth for names and versions (its `update` overwrites them).
 Virtual relation field `scores Score[]`.
 
 **User** (`users`):
@@ -226,7 +233,7 @@ Virtual relation field `scores Score[]`.
 tokens or links. SHA-256, not argon2: 256 bits of entropy makes a slow hash pointless, and an
 unsalted hash allows an indexed lookup (`WHERE token_hash = ?`). `BINARY`, not a string column:
 the table collation is case-insensitive, so a base64url string column would treat `aB` and `Ab`
-as equal. Shared code in `src/auth/tokens.ts`; each token type only supplies its lifetime.
+as equal. Shared code in `src/auth/token.ts`; each token type only supplies its lifetime.
 
 **Score** (`scores`), added November 3, 2026 (migration `add_scores`):
 
@@ -237,7 +244,7 @@ as equal. Shared code in `src/auth/tokens.ts`; each token type only supplies its
 | `game_id` | Int, FK → `games.id` | `ON DELETE RESTRICT` (games are permanent) |
 | `puzzle_date` | Date | UTC date of the puzzle, sent by the client |
 | `score` | Int **UNSIGNED** | |
-| `formula_version` | SmallInt **UNSIGNED** | |
+| `formula_version` | Int **UNSIGNED** | the API caps it at 65,535 (the schema says Int, not SmallInt) |
 | `created_at` | DateTime(3) | submission time |
 
 - Unique on (`user_id`, `game_id`, `puzzle_date`) = `scores_user_id_game_id_puzzle_date_key`:
@@ -251,7 +258,11 @@ as equal. Shared code in `src/auth/tokens.ts`; each token type only supplies its
 - No `updated_at`: scores are never edited.
 - Prisma represents `DATE` as a JS `Date` at midnight UTC. Verified that the MariaDB adapter stores
   and returns the date without a timezone shift.
-- No leaderboard index yet: design it with the leaderboard query.
+- Leaderboard index `scores_game_id_formula_version_puzzle_date_score_created_at_idx` on
+  (`game_id`, `formula_version`, `puzzle_date`, `score` DESC, `created_at`), added November 24, 2026
+  (decision 59). When it was created, MySQL silently dropped the index it had made implicitly for the
+  `game_id` foreign key (`scores_game_id_fkey`), because the new index starts with `game_id` and
+  can serve the key. `prisma migrate diff` reports no drift.
 
 **PriceIsNicePuzzle** (`price_is_nice_puzzles`), added November 17, 2026
 (migration `add_price_is_nice_puzzles`):
@@ -615,6 +626,49 @@ Full request/response/error reference for clients: README.md. Implementation not
     because the header is client-controlled). This is how to find itch.io's real game origin: open
     the game there and read the log.
 
+### Leaderboards, decided and built November 24, 2026
+
+51. **Two boards per game:** `GET /games/:slug/leaderboard/daily?puzzleDate=` and
+    `GET /games/:slug/leaderboard/all-time`, under the path reserved in decision 25. No login needed.
+    A cross-game board was not wanted.
+52. **All-time ranks each player's best single day** (chosen over total points and average per day).
+    If a player has the same best score on several days, the earliest submission counts (consistent
+    with the tie order). The entry carries that day's `puzzleDate` and `submittedAt`.
+53. **`games.current_formula_version`** (Int UNSIGNED, default 1), set in `prisma/seed.ts`. Both
+    boards rank only that version (decision 22). Bumping it starts the game's boards empty for the new
+    version; history still returns every version (decision 31). Unity and the seed must be bumped
+    together (README, Games). Submission does not check the version against it.
+54. **Losses (score 0) are on the boards** and rank last ("wall of shame", decision 21).
+55. **Full boards, offset pagination:** `limit` 1–100 (default 50), `offset` 0–1,000,000, fetch
+    `limit + 1` for `nextOffset` (`null` on the last page). Not keyset, unlike history (decision 27):
+    a keyset cursor needs a unique tiebreaker, and the only unique ones are internal ids (never exposed)
+    or the player tag (not in the index). Ranks need the whole board anyway (window function), so offset
+    adds no cost. A new score while paging can shift an entry onto the next page; each player appears at
+    most once per board, so the client drops entries whose tag it already shows.
+56. **Ranking in raw SQL** (`prisma.$queryRaw` with `Prisma.sql` placeholders, never string
+    concatenation): Prisma's query API has no window functions. `RANK() OVER (ORDER BY score DESC)`
+    implements decision 23; rows are listed by `score DESC, created_at ASC, id ASC` (the id only makes
+    the order total, so pages don't overlap while the board is unchanged). The page and `me` read the
+    same "ranked" subquery, so a player's rank agrees in both. Column alias `player_rank`: `rank` is
+    reserved in MySQL 8.
+57. **`me`:** with no `Authorization` header the caller is a guest and `me` is `null`. A header that
+    is present must be valid (`authenticateOptional`, `src/auth/sessions.ts`), otherwise `401`, so a
+    client with an expired token learns to log in again instead of silently getting the guest view.
+    `me` is also `null` for a logged-in player with no score on the board.
+58. **Daily `puzzleDate`:** required; any date from `1000-01-01` (MySQL `DATE` minimum) up to today's
+    UTC date. Past boards are harmless. A future date gets `400 puzzle_date_in_future` (a client bug:
+    no scores can exist). Format errors reuse `invalid_puzzle_date`.
+59. **One index serves both boards:** (`game_id`, `formula_version`, `puzzle_date`, `score` DESC,
+    `created_at`). Daily is an index lookup on all three prefix columns; all-time reads the
+    (`game_id`, `formula_version`) range, which is every current-version score of the game, and
+    sorts it per player. Measured with 500 players × 60 days × 5 games: daily ~3 ms, all-time ~32 ms
+    (22,500 rows). If all-time gets slow, keep a per-player best-score table updated on submit.
+60. **Raw query result types** (MariaDB adapter, 7.10.1, measured): `INT UNSIGNED` and `BIGINT`
+    columns (`score`, `RANK()`) arrive as `bigint`, unlike Prisma's typed queries, which give `number`;
+    `DATE` arrives as a `Date` at midnight UTC. Rows are checked with zod and converted with `Number()`
+    (values are far below 2^53); an unexpected shape is a logged 500. Re-check after a Prisma upgrade.
+61. **`Cache-Control: no-store`:** boards change with every submission, and `me` is per-player.
+
 ### Unique violations (P2002) with the MariaDB adapter (measured on 7.10.1)
 
 - Unique violations are `PrismaClientKnownRequestError` with code `P2002`; `meta.target` is absent.
@@ -644,7 +698,6 @@ Full request/response/error reference for clients: README.md. Implementation not
   ownership), and the "someone tried to register" email points to password reset. Also decide
   whether unverified accounts expire, and whether unverified accounts keep being allowed to log in
   (decision 12).
-- Leaderboard design (query, index, version filtering) when a leaderboard screen is needed.
 - Server-side score validation per game (puzzle generation options 2 or 3), if ever: would need
   the generator in TypeScript and probably a daily-puzzle table (seed + generator version).
   Price Is Nice already has its puzzle on the server (decisions 35–43).
@@ -756,6 +809,20 @@ Clean up with the `@example.com` delete afterwards.
   today's row and send 5 requests at once → all 200 with the same game, exactly one row.
   A second instance with `PORT=3901 STEAM_API_KEY=` logs "disabled" at startup and answers 503
   `puzzle_unavailable` for a date with no row. Not yet exercised: Steam unreachable, and the cooldown.
+- **Leaderboards** (`board`; verified November 24, 2026, on a second instance on port 3901). Six
+  players with scores inserted by SQL for sudoku: today 700, 500, 500 (later), 0, and a 700 at formula
+  version 2; past days with one player's 900 on two days and another's earlier 900.
+  - Daily: ranks 1, 2, 2, 4 with the earlier 500 first; the version-2 score absent. All-time: the two
+    900s share rank 1 (earlier first), the player with two 900s shows the earlier day, then 3, 4, 5;
+    the version-2 player absent.
+  - `limit=2` with `offset` 0, 2, 4: no overlap, `nextOffset` 2, 4, `null`; an offset past the end →
+    `[]` and `null`. Logged in: `me` has the player's rank even when off the page; a player without
+    a score today → `me: null`; guest → `me: null`.
+  - Errors: missing / `2026-13-01` / `0999-01-01` `puzzleDate` → `invalid_puzzle_date`; `2099-01-01`
+    → `puzzle_date_in_future`; `limit` 0, 101, repeated → `invalid_limit`; `offset` -1, `1e3`, 1000001
+    → `invalid_offset`; `Bearer abc` → 401 `invalid_token`; `Bad_Slug` → `invalid_slug`; `nope` → 404;
+    a game with no scores → `200` with `[]`, `null`, `null`. `Cache-Control: no-store`.
+  - Query plans with the bulk data in DEV_COMMANDS.md (Leaderboard test data): decision 59.
 - **CORS** (verified November 17, 2026, on a second instance with `CORS_ORIGINS` of two https
   origins and `CORS_ALLOW_LOCALHOST=true`): preflight from an allowed origin → 204 with
   Allow-Origin/-Methods/-Headers/Max-Age; from another origin → 204 with only `Vary: Origin` and one
@@ -779,7 +846,7 @@ Clean up with the `@example.com` delete afterwards.
    - ~~`scores` table~~, ~~`POST /games/:slug/scores`~~ (done November 3, 2026)
    - ~~Score history, `GET /games/:slug/scores/me`~~ (built November 4, verified November 5, 2026).
      The client-usable API is complete; client work can start against a local server (CLIENT_TODO.md).
-   - Later: leaderboards (index design, ranking per decision 23, version filtering)
+   - ~~Leaderboards, daily and all-time~~ (done November 24, 2026; decisions 51–61)
    - ~~Price Is Nice puzzles, `GET /games/:slug/puzzle`~~ (done November 17, 2026; decisions 35–43,
      docs/price-is-nice-puzzle.md)
 6. **Next:** email verification endpoint and password reset (real email sender behind the interface);
@@ -822,6 +889,10 @@ Client-side obligations are tracked in CLIENT_TODO.md (Unity repo). Background:
 - **Score history:** one request per game. The history screen follows `nextBefore` until it's `null`,
   keeps only the current formula version's scores, then sorts by date or score (stable sort, date
   as tiebreaker). Before starting a puzzle, `?limit=1` tells whether today's was already played.
+- **Leaderboards:** request the daily board with today's UTC `puzzleDate` and the all-time board,
+  sending the token when logged in so `me` can be shown (pinned, even off-page). Follow `nextOffset`
+  to load more, skipping entries whose tag is already shown. When a game's formula changes, bump its
+  version in Unity and in the server's seed together, or the game's boards won't show new scores.
 
 ## Working style
 

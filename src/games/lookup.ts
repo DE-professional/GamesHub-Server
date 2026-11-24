@@ -2,9 +2,9 @@ import { prisma } from "../db.js";
 import { describeError, HttpError } from "../errors.js";
 
 // Finds a game by an already validated slug (see parseSlug), or throws 404 game_not_found.
-export async function requireGame(slug: string): Promise<{ id: number; slug: string; name: string }> {
+export async function requireGame(slug: string): Promise<{ id: number; slug: string; name: string; currentFormulaVersion: number }> {
     const game = await prisma.game
-        .findUnique({ where: { slug }, select: { id: true, slug: true, name: true } })
+        .findUnique({ where: { slug }, select: { id: true, slug: true, name: true, currentFormulaVersion: true } })
         .catch((err: unknown) => {
             throw new Error(`Game lookup failed: ${describeError(err)}`);
         });

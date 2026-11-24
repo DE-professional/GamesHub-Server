@@ -371,6 +371,84 @@ Response `200`:
 | 404 | `puzzle_not_served` | The game generates its own puzzle (every game except `price-is-nice`) |
 | 503 | `puzzle_unavailable` | The puzzle couldn't be picked right now (Steam unreachable, no `STEAM_API_KEY`); retry shortly |
 
+### Leaderboards
+
+Two boards per game, both readable without login:
+
+- `GET /games/:slug/leaderboard/daily?puzzleDate=YYYY-MM-DD`: every player's score for one day.
+- `GET /games/:slug/leaderboard/all-time`: every player's **best single day**.
+
+Query parameters:
+
+- `puzzleDate` (daily only, required): the UTC date of the puzzle. Any date up to today's UTC date.
+- `limit` (optional): an integer from 1 to 100; default 50. Entries per page.
+- `offset` (optional): an integer from 0 to 1,000,000; default 0. Pass the previous page's
+  `nextOffset` here to get the next page.
+
+Login is optional. Without an `Authorization` header, `me` is `null`. With a valid token, `me` is
+the player's own entry, wherever it is on the board (or `null` if they have no score on it). A
+token that is present but invalid or expired gets `401`, like any protected endpoint, so the client
+knows to log in again.
+
+Response `200` (daily; all-time is the same without the top-level `puzzleDate`):
+
+```json
+{
+  "game": "sudoku",
+  "formulaVersion": 1,
+  "puzzleDate": "2026-11-24",
+  "entries": [
+    {
+      "rank": 1,
+      "player": { "displayName": "Dan", "discriminator": 1234 },
+      "score": 700,
+      "puzzleDate": "2026-11-24",
+      "submittedAt": "2026-11-24T20:32:14.643Z"
+    },
+    {
+      "rank": 2,
+      "player": { "displayName": "Alice", "discriminator": 5678 },
+      "score": 500,
+      "puzzleDate": "2026-11-24",
+      "submittedAt": "2026-11-24T20:22:14.643Z"
+    },
+    {
+      "rank": 2,
+      "player": { "displayName": "Bob", "discriminator": 9012 },
+      "score": 500,
+      "puzzleDate": "2026-11-24",
+      "submittedAt": "2026-11-24T20:42:14.643Z"
+    }
+  ],
+  "nextOffset": 3,
+  "me": null
+}
+```
+
+- **Ranks:** higher scores rank first. Equal scores share a rank and the next rank is skipped
+  (1, 2, 2, 4). Within a tie, the earlier submission is listed first.
+- **Only the game's current formula version** (`formulaVersion` in the response) is ranked. Scores
+  from other versions are left out of both boards.
+- **All-time:** one entry per player, their highest daily score. `puzzleDate` and `submittedAt` are
+  that day's. If a player has the same best score on several days, the earliest counts.
+- Losses (score 0) are included and rank last.
+- Each player appears at most once per board, so the player tag identifies an entry.
+- **Paging:** `nextOffset` is `null` on the last page. New scores can arrive while a player pages
+  through a board, which shifts later entries down. A player can then appear on two pages: skip
+  entries whose tag is already shown.
+- `Cache-Control: no-store`.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 200 | | Board returned (possibly empty) |
+| 400 | `invalid_slug` | Slug isn't 1–64 lowercase letters, digits, or hyphens |
+| 400 | `invalid_puzzle_date` | Daily: `puzzleDate` is missing or isn't a valid `YYYY-MM-DD` date |
+| 400 | `puzzle_date_in_future` | Daily: `puzzleDate` is after today's UTC date |
+| 400 | `invalid_limit` | `limit` isn't an integer from 1 to 100 |
+| 400 | `invalid_offset` | `offset` isn't an integer from 0 to 1,000,000 |
+| 401 | `invalid_token` | An `Authorization` header was sent but the session is invalid or expired |
+| 404 | `game_not_found` | No game has this slug |
+
 ### Games
 
 Each Unity game identifies itself by its **slug**. Slugs are permanent: never
@@ -386,6 +464,11 @@ change one after a game uses it.
 
 To add a game, add an entry to the `games` list in `prisma/seed.ts`, run
 `npm run db:seed`, and add it to this table.
+
+Each entry also has a `currentFormulaVersion`: the formula version Unity currently submits for that
+game. Leaderboards rank only scores with that version. When a game's score formula changes, bump
+the version in Unity and in `prisma/seed.ts` together, then run `npm run db:seed`. The game's boards
+then start empty for the new version; older scores stay in each player's history.
 
 Every game except Price Is Nice builds its daily puzzle in Unity from the date. Price Is Nice gets
 its puzzle from `GET /games/price-is-nice/puzzle`.
@@ -473,6 +556,7 @@ src/
   email/               email sending (prints to the console in development) and templates
   games/               game slug validation and lookup
   scores/              score submission and history; the open puzzle date window
+  leaderboards/        daily and all-time leaderboards (raw SQL ranking queries)
   puzzles/             server-picked daily puzzles: the Price Is Nice route, picking, Steam client
 .env.example           template for your .env
 DEV_COMMANDS.md        terminal commands for testing and database work
